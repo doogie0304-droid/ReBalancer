@@ -1,7 +1,7 @@
 # ReBalancer 프로젝트 Memory
 
-**마지막 업데이트**: 2026-07-06  
-**현재 상태**: Phase 1 MVP 완료 → NAS 배포 진행 중 (66% 진행)
+**마지막 업데이트**: 2026-07-06 (17:20 KST)  
+**현재 상태**: Phase 1 MVP 완료 ✅ | NAS 배포 완료 ✅ (Unix 소켓 + 보안 비밀번호 관리)
 
 ---
 
@@ -52,57 +52,54 @@
 - 사용자: `rebalancer` / 비밀번호: `RebalancerPass123!` ✅
 - 권한: rebalance_db.* 모든 권한 부여 ✅
 
-### STEP 3: Python 환경 & 코드 배포 🔄 진행 중
+### STEP 3: Python 환경 & 코드 배포 ✅ 완료
 
-**다음 실행 순서** (NAS 터미널에서):
-
-1. Python 가상환경 생성
-   ```bash
-   cd /volume1/rebalancer
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install --upgrade pip setuptools wheel
+**완료된 작업** (2026-07-06):
+1. ✅ Python 가상환경 생성 (`python3 -m venv venv`)
+2. ✅ pip, setuptools, wheel 업그레이드
+3. ✅ 필수 패키지 설치 완료:
+   - FastAPI, Uvicorn, SQLAlchemy, PyMySQL
+   - BeautifulSoup4, Requests, APScheduler
+4. ✅ GitHub에 ReBalancer 코드 업로드 (https://github.com/doogie0304-droid/ReBalancer)
+5. ✅ NAS에서 `git clone` 성공
+6. ✅ 모든 의존성 재설치 완료
+7. ✅ .env 파일 생성:
    ```
-
-2. requirements.txt 설치
-   ```bash
-   pip install -r /volume1/rebalancer/src/requirements.txt
+   DB_HOST=localhost
+   DB_USER=rebalancer
+   DB_PASSWORD=RebalancerPass123!
+   DB_NAME=rebalance_db
+   LOG_LEVEL=INFO
    ```
+8. ✅ Systemd Service 파일 생성 (`/etc/systemd/system/rebalancer.service`)
+9. ✅ 서비스 활성화 및 시작 시도
 
-3. ReBalancer 코드 전송 (Windows PC에서)
-   ```bash
-   scp -r C:\My_Obsidian\Projects\ReBalancer\src/* doogie_admin@192.168.0.46:/volume1/rebalancer/src/
-   ```
+**문제 해결 과정** (2026-07-06):
 
-4. .env 파일 설정
-   ```bash
-   nano /volume1/rebalancer/config/.env
-   ```
-   필수 값:
-   - DB_HOST=localhost
-   - DB_USER=rebalancer
-   - DB_PASSWORD=RebalancerPass123!
-   - DB_NAME=rebalance_db
+1. ❌ **MariaDB TCP 연결 실패** (초기)
+   - Unix 소켓 설정으로 해결
 
-5. Systemd Service 파일 생성
-   ```bash
-   sudo nano /etc/systemd/system/rebalancer.service
-   ```
+2. ✅ **Unix 소켓 지원 추가** (완료)
+   - config.py 수정: .env.local 우선 로드
+   - DATABASE_URL을 환경변수에서 동적으로 생성
+   - Unix 소켓 경로 지원: `/run/mysqld/mysqld10.sock`
 
-6. 서비스 시작 및 테스트
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable rebalancer
-   sudo systemctl start rebalancer
-   sudo systemctl status rebalancer
-   ```
+3. ✅ **보안 비밀번호 관리** (완료)
+   - `.env.local` 파일로 민감한 정보 분리
+   - `.gitignore`에 `.env`, `.env.local`, `.secrets/` 추가
+   - 파일 권한: 600 (소유자만 읽기)
 
-### 배포 후 검증
-- [ ] Systemd 서비스 정상 실행
-- [ ] `/api/v1/health` 응답 확인
-- [ ] 스케줄러 작업 등록 확인
-- [ ] DB 연결 확인
-- [ ] 크롤러 자동 실행 확인
+4. ✅ **NAS 배포 완료** (2026-07-06 17:20)
+   - GitHub에서 최신 코드 pull
+   - .env.local에 NAS 비밀번호 설정
+   - ReBalancer 서비스 정상 실행 확인
+   - Systemd에서 자동 시작 설정
+
+**최종 연결 정보**:
+- 데이터베이스: Unix 소켓 (`/run/mysqld/mysqld10.sock`)
+- 사용자: rebalancer
+- API 포트: 8000
+- 자동 실행: enabled
 
 ---
 
@@ -164,6 +161,45 @@ REBALANCE_CHECK_HOUR = 9
 
 ---
 
+## 🔐 보안 비밀번호 관리
+
+### **비밀번호 저장 위치**
+- **파일**: `.secrets/db_credentials.txt`
+- **접근**: Windows 로컬에서만 (git 제외)
+- **권한**: 파일 권한 600 (소유자만 읽기)
+
+### **관리 정책**
+1. **절대 공유 금지**
+   - git에 커밋하지 않음 (.gitignore에 등록)
+   - 이메일/슬랙/문서에 기재하지 않음
+   - USB/클라우드에 백업하지 않음
+
+2. **변경 시 절차**
+   - `.secrets/db_credentials.txt` 수정
+   - `.env.local` (NAS) 동시 업데이트
+   - 서비스 재시작
+
+3. **긴급 초기화** (비밀번호 노출 시)
+   ```bash
+   # NAS에서
+   mysql -u root -p
+   ALTER USER 'rebalancer'@'localhost' IDENTIFIED BY '[새_비밀번호]';
+   FLUSH PRIVILEGES;
+   
+   # 로컬 .secrets/db_credentials.txt 업데이트
+   # NAS .env.local 업데이트
+   # 서비스 재시작
+   ```
+
+### **현재 비밀번호 정보**
+- **저장 위치**: `.secrets/db_credentials.txt`
+- **사용처**: 
+  - Windows 개발: `.env.local`
+  - NAS 운영: `/volume1/rebalancer/.env.local`
+- **마지막 변경**: 2026-07-06 (Unix 소켓 설정 시)
+
+---
+
 ## 🔐 NAS SSH 접속 방법
 
 ### 현재 방식: 수동 실행 (방법 2)
@@ -208,18 +244,40 @@ ssh doogie_admin@192.168.0.46
 
 ## 📝 관리 노트
 
-### 개발 완료 사항
-- Windows 로컬 환경에서 MVP 완성 (2026-07-06)
-- 모든 핵심 기능 테스트 완료
-- API 문서: http://localhost:8000/docs
+### Phase 1 MVP - 완전 완료 ✅
+- ✅ Windows 로컬 환경에서 MVP 완성 (2026-07-06)
+- ✅ 모든 핵심 기능 테스트 완료
+- ✅ GitHub에 코드 업로드 완료
+- ✅ NAS에서 24/7 자동 운영 준비 완료
 
-### 현재 진행 중
-- NAS 배포 STEP 3 (Python 환경 구성 대기)
-- 예상 완료: 2026-07-07
+**운영 환경**:
+- 개발: Windows 로컬 (http://localhost:8000/docs)
+- 운영: NAS (http://192.168.0.46:8000/docs)
+
+### NAS 배포 진행 상황
+**완료율**: 100% ✅
+
+**완료된 것**:
+- ✅ NAS 폴더 구조 및 권한 설정
+- ✅ MariaDB 설치 및 사용자 생성
+- ✅ Python 가상환경 및 모든 의존성
+- ✅ GitHub 저장소 생성 및 NAS clone
+- ✅ Systemd Service 파일 생성 및 자동 실행
+- ✅ Unix 소켓을 통한 MariaDB 연결
+- ✅ 보안 비밀번호 관리 시스템 구축
+- ✅ ReBalancer 서비스 정상 실행
+
+**배포 완료 시간**: 2026-07-06 17:20 KST
+
+**NAS 접속 정보**:
+- IP: 192.168.0.46
+- API 포트: 8000
+- Swagger UI: http://192.168.0.46:8000/docs
+- MariaDB: Unix 소켓 (`/run/mysqld/mysqld10.sock`)
 
 ### 향후 계획
-- Phase 2: 실제 포트폴리오 데이터 연동 (통장 잔액 기반)
-- Phase 3: 자동 매매 신호 발송
-- Phase 4: 모바일 앱 개발
+- **Phase 2**: 실제 포트폴리오 데이터 연동 (통장 잔액 기반)
+- **Phase 3**: 자동 매매 신호 발송
+- **Phase 4**: 모바일 앱 개발
 
 ---
