@@ -15,10 +15,18 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # 데이터베이스
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "mysql+pymysql://rebalance_user:rebalance_pass@localhost:3306/rebalance_db"
-)
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "3306")
+DB_USER = os.getenv("DB_USER", "rebalancer")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "RebalancerPass123!")
+DB_NAME = os.getenv("DB_NAME", "rebalance_db")
+DB_SOCKET = os.getenv("DB_SOCKET", "")
+
+# Unix 소켓이 있으면 사용, 없으면 TCP 연결
+if DB_SOCKET:
+    DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@/{DB_NAME}?unix_socket={DB_SOCKET}"
+else:
+    DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # 모멘텀 파라미터 (확정)
 MOMENTUM_WEIGHTS = {
