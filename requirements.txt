@@ -7,3 +7,4 @@ beautifulsoup4==4.12.2
 apscheduler==3.10.4
 pytz==2023.3
 python-dotenv==1.0.0
+python-telegram-bot==13.15

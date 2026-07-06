@@ -57,10 +57,11 @@ MOMENTUM_SCHEDULE_MONTH_DAY = 2
 MOMENTUM_SCHEDULE_HOUR = 9
 
 # 알림 설정
-NOTIFICATION_CHANNELS = ["console"]
+NOTIFICATION_CHANNELS = ["console", "telegram"]
 FCM_API_KEY = os.getenv("FCM_API_KEY", "")
 SMTP_SERVER = os.getenv("SMTP_SERVER", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # 관리 종목 (연금저축펀드)
 PENSION_ETFS = {

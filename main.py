@@ -9,11 +9,12 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from config import API_TITLE, API_DESCRIPTION, API_VERSION, LOG_LEVEL, PENSION_ETFS, IRP_PORTFOLIO
-from database import init_db, get_db, ETFPrice, MomentumScore, RebalanceSignal
+from database import init_db, get_db, ETFPrice, MomentumScore, RebalanceSignal, UserPortfolio
 from scheduler import get_scheduler
 from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine
 from rebalance_engine import RebalanceEngine
+from portfolio_engine import PortfolioEngine
 from datetime import date
 
 logging.basicConfig(
@@ -209,6 +210,163 @@ async def get_latest_rebalance_signal(db: Session = Depends(get_db)) -> Dict:
     except Exception as e:
         logger.error(f"리밸런싱 신호 조회 오류: {e}")
         raise HTTPException(status_code=500, detail="리밸런싱 신호 조회 실패")
+
+# ==================== Portfolio Management ====================
+
+@app.post("/api/v1/portfolio/add")
+async def add_portfolio_holding(
+    ticker: str,
+    quantity: float,
+    avg_buy_price: float,
+    account_type: str = "IRP",
+    db: Session = Depends(get_db)
+) -> Dict:
+    """포트폴리오 종목 추가"""
+    try:
+        portfolio_engine = PortfolioEngine(db)
+        result = portfolio_engine.add_portfolio_holding(ticker, quantity, avg_buy_price, account_type)
+
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return {
+            "status": "ok",
+            "message": "Portfolio holding added",
+            "data": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Portfolio add error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add portfolio holding")
+
+@app.get("/api/v1/portfolio")
+async def get_portfolio(
+    account_type: str = None,
+    db: Session = Depends(get_db)
+) -> Dict:
+    """포트폴리오 조회"""
+    try:
+        portfolio_engine = PortfolioEngine(db)
+
+        if account_type:
+            holdings = portfolio_engine.get_portfolio_by_account(account_type)
+        else:
+            holdings = db.query(UserPortfolio).filter(UserPortfolio.is_active == True).all()
+
+        data = [
+            {
+                "ticker": h.ticker,
+                "quantity": h.quantity,
+                "avg_buy_price": h.avg_buy_price,
+                "account_type": h.account_type,
+                "created_at": h.created_at.isoformat() if h.created_at else None,
+                "updated_at": h.updated_at.isoformat() if h.updated_at else None
+            }
+            for h in holdings
+        ]
+
+        return {
+            "status": "ok",
+            "count": len(data),
+            "data": data
+        }
+    except Exception as e:
+        logger.error(f"Portfolio query error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve portfolio")
+
+@app.get("/api/v1/portfolio/{ticker}")
+async def get_portfolio_holding(
+    ticker: str,
+    account_type: str = "IRP",
+    db: Session = Depends(get_db)
+) -> Dict:
+    """특정 종목 포트폴리오 조회"""
+    try:
+        portfolio_engine = PortfolioEngine(db)
+        result = portfolio_engine.get_portfolio_by_ticker(ticker, account_type)
+
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Portfolio holding not found: {ticker}")
+
+        return {
+            "status": "ok",
+            "data": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Portfolio query error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve portfolio holding")
+
+@app.put("/api/v1/portfolio/{ticker}")
+async def update_portfolio_holding(
+    ticker: str,
+    quantity: float,
+    avg_buy_price: float,
+    account_type: str = "IRP",
+    db: Session = Depends(get_db)
+) -> Dict:
+    """포트폴리오 종목 수정"""
+    try:
+        portfolio_engine = PortfolioEngine(db)
+        result = portfolio_engine.update_portfolio_holding(ticker, quantity, avg_buy_price, account_type)
+
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+
+        return {
+            "status": "ok",
+            "message": "Portfolio holding updated",
+            "data": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Portfolio update error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update portfolio holding")
+
+@app.delete("/api/v1/portfolio/{ticker}")
+async def delete_portfolio_holding(
+    ticker: str,
+    account_type: str = "IRP",
+    db: Session = Depends(get_db)
+) -> Dict:
+    """포트폴리오 종목 삭제"""
+    try:
+        portfolio_engine = PortfolioEngine(db)
+        success = portfolio_engine.delete_portfolio_holding(ticker, account_type)
+
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Portfolio holding not found: {ticker}")
+
+        return {
+            "status": "ok",
+            "message": "Portfolio holding deleted"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Portfolio delete error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete portfolio holding")
+
+@app.get("/api/v1/portfolio/performance/summary")
+async def get_portfolio_performance(
+    account_type: str = None,
+    db: Session = Depends(get_db)
+) -> Dict:
+    """포트폴리오 수익률 계산"""
+    try:
+        portfolio_engine = PortfolioEngine(db)
+        performance = portfolio_engine.calculate_portfolio_performance(account_type)
+
+        return {
+            "status": "ok",
+            "data": performance
+        }
+    except Exception as e:
+        logger.error(f"Portfolio performance calculation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to calculate portfolio performance")
 
 # ==================== Scheduler Control ====================
 

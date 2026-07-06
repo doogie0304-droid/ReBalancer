@@ -12,10 +12,11 @@ from config import (
     MOMENTUM_SCHEDULE_HOUR, PENSION_ETFS, REBALANCE_CHECK_DATES,
     REBALANCE_CHECK_HOUR
 )
-from database import get_db
+from database import get_db, ETFPrice, MomentumScore
 from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine
 from rebalance_engine import RebalanceEngine
+from notification import TelegramNotificationManager
 from datetime import date
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,25 @@ class JobScheduler:
                 f"Success: {stats['success']}, Failed: {stats['fail']}, Skipped: {stats['skip']}"
             )
 
+            # 최신 종가 데이터 조회
+            latest_prices = {}
+            for ticker in PENSION_ETFS.keys():
+                latest = db.query(ETFPrice).filter(
+                    ETFPrice.ticker == ticker
+                ).order_by(ETFPrice.price_date.desc()).first()
+
+                if latest:
+                    latest_prices[ticker] = latest.close_price
+
+            # Telegram 알림
+            if stats['success'] > 0:
+                notifier = TelegramNotificationManager(db)
+                etf_data = {
+                    "date": date.today().isoformat(),
+                    "prices": latest_prices
+                }
+                notifier.send_price_alert(etf_data)
+
         except Exception as e:
             logger.error(f"[Price Collection] Error: {type(e).__name__}: {e}", exc_info=True)
         finally:
@@ -152,6 +172,13 @@ class JobScheduler:
                 f"[Momentum Calculation] Completed - "
                 f"Calculated: {len(all_scores)}, Saved: {saved_count}, Top Selected: {len(top_n_scores)}"
             )
+
+            # Telegram 알림
+            if top_n_scores:
+                notifier = TelegramNotificationManager(db)
+                selected_tickers = [score['ticker'] for score in top_n_scores]
+                momentum_data = {score['ticker']: score for score in top_n_scores}
+                notifier.send_momentum_alert(selected_tickers, calc_date.isoformat(), momentum_data)
 
         except Exception as e:
             logger.error(f"[Momentum Calculation] Error: {type(e).__name__}: {e}", exc_info=True)
@@ -198,6 +225,12 @@ class JobScheduler:
                         f"Diff={signal['weight_diff']:+.1f}%, "
                         f"Amount={signal['rebalance_amount']:,.0f}"
                     )
+
+            # Telegram 알림
+            notifier = TelegramNotificationManager(db)
+            needs_rebalance = needs_rebalance_count > 0
+            rebalance_signals = [s for s in signals if s['needs_rebalance']]
+            notifier.send_rebalance_alert(needs_rebalance, signal_date.isoformat(), rebalance_signals)
 
         except Exception as e:
             logger.error(f"[Rebalance Check] Error: {type(e).__name__}: {e}", exc_info=True)
