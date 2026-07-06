@@ -3,7 +3,10 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# .env.local 우선 로드 (비밀번호 관리)
+load_dotenv('.env.local', override=True)
+# 다음 .env 로드 (기본 설정)
+load_dotenv('.env')
 
 # API 설정
 API_TITLE = "ReBalancer"
