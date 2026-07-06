@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ReBalancer Server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py"],
+      "port": 8000,
+      "cwd": "C:\\My_Obsidian\\Projects\\ReBalancer"
+    }
+  ]
+}
