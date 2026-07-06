@@ -88,6 +88,19 @@ class CrawlHistory(Base):
     completed_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
 
+class UserPortfolio(Base):
+    """사용자 보유 포트폴리오"""
+    __tablename__ = "user_portfolio"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String(20), index=True, nullable=False)
+    quantity = Column(Float, nullable=False)
+    avg_buy_price = Column(Float, nullable=False)
+    account_type = Column(String(20), default="IRP")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 def init_db():
     """데이터베이스 초기화"""
     Base.metadata.create_all(bind=engine)
