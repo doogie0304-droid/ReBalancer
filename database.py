@@ -101,6 +101,26 @@ class UserPortfolio(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+class SignalAccuracy(Base):
+    """신호 신뢰도 평가"""
+    __tablename__ = "signal_accuracy"
+
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(String(50), index=True, nullable=False)
+    signal_type = Column(String(20), nullable=False)  # 'momentum', 'rebalance'
+    signal_date = Column(Date, index=True, nullable=False)
+    ticker = Column(String(20), index=True)
+    signal_direction = Column(String(10))  # 'BUY', 'SELL', 'HOLD'
+    signal_confidence = Column(Float)  # 0.0 ~ 1.0, 신호 발송 시 점수
+    price_at_signal = Column(Float)  # 신호 발송 시 가격
+    evaluation_date = Column(Date, index=True)  # 평가 실시 날짜 (signal_date + 30일)
+    price_at_evaluation = Column(Float)  # 평가 시점 가격
+    actual_return_pct = Column(Float)  # 실제 수익률 %
+    signal_correct = Column(Boolean)  # 신호 방향이 맞았는지 여부
+    accuracy_score = Column(Float)  # 0.0 ~ 1.0, 최종 정확도 점수
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 def init_db():
     """데이터베이스 초기화"""
     Base.metadata.create_all(bind=engine)

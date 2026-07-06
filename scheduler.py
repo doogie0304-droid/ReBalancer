@@ -17,6 +17,7 @@ from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine
 from rebalance_engine import RebalanceEngine
 from notification import TelegramNotificationManager
+from signal_accuracy_engine import SignalAccuracyEngine
 from datetime import date
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,17 @@ class JobScheduler:
                 f"Calculated: {len(all_scores)}, Saved: {saved_count}, Top Selected: {len(top_n_scores)}"
             )
 
+            # SignalAccuracyEngine - 신호 기록
+            if top_n_scores:
+                accuracy_engine = SignalAccuracyEngine(db)
+                for score in top_n_scores:
+                    signal_result = accuracy_engine.record_momentum_signal(
+                        ticker=score['ticker'],
+                        momentum_score=score,
+                        signal_date=calc_date.isoformat()
+                    )
+                    logger.info(f"[Signal Recorded] Momentum: {signal_result['signal_id']} - {signal_result['direction']} (confidence: {signal_result['confidence']:.2f})")
+
             # Telegram 알림
             if top_n_scores:
                 notifier = TelegramNotificationManager(db)
@@ -225,6 +237,17 @@ class JobScheduler:
                         f"Diff={signal['weight_diff']:+.1f}%, "
                         f"Amount={signal['rebalance_amount']:,.0f}"
                     )
+
+            # SignalAccuracyEngine - 신호 기록
+            accuracy_engine = SignalAccuracyEngine(db)
+            for signal in signals:
+                signal_result = accuracy_engine.record_rebalance_signal(
+                    ticker=signal['ticker'],
+                    action=signal['action'],
+                    signal_date=signal_date.isoformat(),
+                    current_price=signal['current_price']
+                )
+                logger.info(f"[Signal Recorded] Rebalance: {signal_result['signal_id']} - {signal_result['direction']} (confidence: {signal_result['confidence']:.2f})")
 
             # Telegram 알림
             notifier = TelegramNotificationManager(db)

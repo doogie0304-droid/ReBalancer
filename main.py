@@ -15,6 +15,7 @@ from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine
 from rebalance_engine import RebalanceEngine
 from portfolio_engine import PortfolioEngine
+from signal_accuracy_engine import SignalAccuracyEngine
 from datetime import date
 
 logging.basicConfig(
@@ -528,6 +529,87 @@ async def trigger_check_rebalance(db: Session = Depends(get_db)) -> Dict:
     except Exception as e:
         logger.error(f"수동 리밸런싱 체크 오류: {e}")
         raise HTTPException(status_code=500, detail=f"리밸런싱 체크 실패: {str(e)}")
+
+# ==================== Signal Accuracy ====================
+
+@app.get("/api/v1/signals/accuracy/stats")
+async def get_accuracy_stats(
+    signal_type: str = None,
+    limit_days: int = 90,
+    db: Session = Depends(get_db)
+) -> Dict:
+    """신호 신뢰도 통계 조회"""
+    try:
+        accuracy_engine = SignalAccuracyEngine(db)
+        stats = accuracy_engine.get_accuracy_stats(signal_type, limit_days)
+        return {"status": "ok", "data": stats}
+    except Exception as e:
+        logger.error(f"신뢰도 통계 조회 오류: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve accuracy stats")
+
+@app.get("/api/v1/signals/accuracy/pending")
+async def get_pending_evaluations(db: Session = Depends(get_db)) -> Dict:
+    """평가 대기 중인 신호 조회"""
+    try:
+        accuracy_engine = SignalAccuracyEngine(db)
+        pending = accuracy_engine.get_pending_evaluations()
+        return {
+            "status": "ok",
+            "pending_count": len(pending),
+            "signals": pending
+        }
+    except Exception as e:
+        logger.error(f"평가 대기 신호 조회 오류: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve pending evaluations")
+
+@app.post("/api/v1/signals/evaluate/{signal_id}")
+async def evaluate_signal(signal_id: str, db: Session = Depends(get_db)) -> Dict:
+    """특정 신호 평가"""
+    try:
+        accuracy_engine = SignalAccuracyEngine(db)
+        result = accuracy_engine.evaluate_signal(signal_id)
+
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+
+        return {"status": "ok", "data": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"신호 평가 오류: {e}")
+        raise HTTPException(status_code=500, detail="Failed to evaluate signal")
+
+@app.post("/api/v1/jobs/evaluate-pending-signals")
+async def evaluate_pending_signals(db: Session = Depends(get_db)) -> Dict:
+    """대기 중인 모든 신호 평가 (배치 작업)"""
+    try:
+        accuracy_engine = SignalAccuracyEngine(db)
+        pending = accuracy_engine.get_pending_evaluations()
+
+        if not pending:
+            return {
+                "status": "ok",
+                "message": "평가할 신호 없음",
+                "evaluated_count": 0
+            }
+
+        evaluated_count = 0
+        for signal_info in pending:
+            result = accuracy_engine.evaluate_signal(signal_info["signal_id"])
+            if "error" not in result:
+                evaluated_count += 1
+
+        logger.info(f"Evaluated {evaluated_count}/{len(pending)} pending signals")
+
+        return {
+            "status": "ok",
+            "message": f"{evaluated_count}개 신호 평가 완료",
+            "evaluated_count": evaluated_count,
+            "total_pending": len(pending)
+        }
+    except Exception as e:
+        logger.error(f"배치 평가 오류: {e}")
+        raise HTTPException(status_code=500, detail="Failed to evaluate pending signals")
 
 # ==================== Shutdown ====================
 
