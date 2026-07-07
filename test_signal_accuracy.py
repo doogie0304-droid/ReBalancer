@@ -72,11 +72,17 @@ def test_signal_accuracy():
         print("-" * 60)
 
         if pending:
-            signal_id = pending[0]["signal_id"]
-            print(f"Evaluating signal: {signal_id}")
+            for sig in pending:
+                signal_id = sig["signal_id"]
+                print(f"Evaluating signal: {signal_id}")
 
-            # 평가를 위해 30일 뒤 가격 데이터 필요
-            print("(실제 평가는 30일 뒤 가격 데이터가 필요합니다)")
+                eval_result = accuracy_engine.evaluate_signal(signal_id)
+                if "error" in eval_result:
+                    print(f"  -> Skipped: {eval_result['error']}")
+                else:
+                    print(f"  -> Correct: {eval_result['signal_correct']}, "
+                          f"Actual return: {eval_result['actual_return_pct']:.2f}%, "
+                          f"Accuracy score: {eval_result['accuracy_score']:.3f}")
 
         print("\n[Test 5] 정확도 통계")
         print("-" * 60)
