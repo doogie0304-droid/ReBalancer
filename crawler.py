@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """ReBalancer - 네이버 ETF 시세 크롤러"""
 
+import json
 import requests
 import logging
 import time
 from typing import Optional, List, Tuple, Dict
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from config import PENSION_ETFS, IRP_PORTFOLIO, CRAWL_RETRY_COUNT, CRAWL_RETRY_DELAY
@@ -16,94 +16,80 @@ logger = logging.getLogger(__name__)
 class NaverETFCrawler:
     """네이버 ETF 시세 크롤러"""
 
-    BASE_URL = "https://finance.naver.com/item/sise_day.naver"
+    # 2026-09 네이버가 finance.naver.com/item/sise_day.naver 페이지를 폐지(410)해
+    # Npay 증권(m.stock.naver.com) JSON API로 교체. 수정주가가 아닌 실제 종가를 반환한다.
+    BASE_URL = "https://m.stock.naver.com/api/stock/{ticker}/price"
     HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
 
-    def fetch_page(self, ticker: str, page: int = 1) -> Optional[str]:
-        """네이버 페이지 다운로드
-        
+    def fetch_page(self, ticker: str, page: int = 1, page_size: int = 10) -> Optional[str]:
+        """네이버 일별 시세 API 호출
+
         Args:
             ticker: ETF 티커 코드
-            page: 페이지 번호 (기본값: 1)
-        
+            page: 페이지 번호 (기본값: 1, 최신순)
+            page_size: 페이지당 거래일 수 (기본값: 10, 최대 60)
+
         Returns:
-            HTML 문자열 또는 None (실패 시)
+            JSON 문자열 또는 None (실패 시)
         """
         for attempt in range(CRAWL_RETRY_COUNT):
             try:
                 response = requests.get(
-                    self.BASE_URL,
-                    params={'code': ticker, 'page': page},
+                    self.BASE_URL.format(ticker=ticker),
+                    params={'pageSize': page_size, 'page': page},
                     headers=self.HEADERS,
                     timeout=10
                 )
                 response.raise_for_status()
                 return response.text
-                
+
             except requests.exceptions.RequestException as e:
                 logger.warning(
                     f"페이지 다운로드 실패 ({ticker}, 시도 {attempt+1}/{CRAWL_RETRY_COUNT}): {e}"
                 )
                 if attempt < CRAWL_RETRY_COUNT - 1:
                     time.sleep(CRAWL_RETRY_DELAY)
-                    
+
         logger.error(f"Failed to fetch {ticker} after {CRAWL_RETRY_COUNT} retries")
         return None
 
-    def parse_price_data(self, html: Optional[str]) -> List[Tuple[str, float]]:
-        """HTML에서 시세 파싱
-        
+    def parse_price_data(self, body: Optional[str]) -> List[Tuple[str, float]]:
+        """일별 시세 API 응답(JSON)에서 시세 파싱
+
         Args:
-            html: BeautifulSoup으로 파싱할 HTML 문자열
-            
+            body: fetch_page가 반환한 JSON 문자열
+
         Returns:
-            [(날짜, 종가), ...] 형태의 리스트
+            [(날짜 "YYYY-MM-DD", 종가), ...] 형태의 리스트
         """
-        # Null 가드: html이 None이거나 빈 문자열인 경우 처리
-        if not html:
-            logger.warning("HTML input is None or empty string")
+        if not body:
+            logger.warning("Price response is None or empty string")
             return []
-        
-        prices = []
+
         try:
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # CSS 선택자 사용 (네이버 금융 현재 구조)
-            table = soup.select_one('table.type2')
-            if not table:
-                logger.warning("Price table not found")
-                return prices
-
-            rows = table.find_all('tr')[2:]  # 헤더(행1) + 빈행(행2) 제외
-
-            for idx, row in enumerate(rows):
-                try:
-                    tds = row.find_all('td')
-                    if len(tds) < 2:
-                        continue
-
-                    date_str = tds[0].get_text(strip=True)
-                    price_str = tds[1].get_text(strip=True).replace(',', '')
-
-                    # 빈 문자열 체크
-                    if not price_str:
-                        continue
-
-                    # 날짜 형식 변환: 2026.07.06 → 2026-07-06
-                    date_str = date_str.replace('.', '-')
-
-                    price = float(price_str)
-                    prices.append((date_str, price))
-
-                except (ValueError, IndexError) as e:
-                    logger.debug(f"Row {idx} parse error (skipped): {e}")
-                    continue
-
-        except Exception as e:
-            logger.error(f"Unexpected error during HTML parsing: {type(e).__name__}: {e}")
+            items = json.loads(body)
+        except ValueError as e:
+            logger.error(f"Price response is not valid JSON: {e}")
             return []
+
+        if not isinstance(items, list):
+            logger.warning(f"Unexpected price response shape: {type(items).__name__}")
+            return []
+
+        prices = []
+        for idx, item in enumerate(items):
+            try:
+                date_str = item['localTradedAt'][:10]
+                datetime.strptime(date_str, "%Y-%m-%d")
+                price = float(str(item['closePrice']).replace(',', ''))
+                if price <= 0:
+                    continue
+                prices.append((date_str, price))
+            except (KeyError, TypeError, ValueError) as e:
+                logger.debug(f"Row {idx} parse error (skipped): {e}")
+                continue
 
         return prices
 
