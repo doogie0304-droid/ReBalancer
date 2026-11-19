@@ -8,12 +8,13 @@ from datetime import datetime, date, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
+from sqlalchemy import func
 from config import (
     TIMEZONE, CRAWL_SCHEDULE_HOUR,
     MOMENTUM_SCHEDULE_HOUR, PENSION_ETFS, IRP_PORTFOLIO, REBALANCE_CHECK_DATES,
     REBALANCE_CHECK_HOUR, MARKET_HOLIDAYS, HOLIDAY_API_KEY_EXPIRES
 )
-from database import get_db, MomentumScore
+from database import get_db, ETFPrice, MomentumScore
 from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine
 from rebalance_engine import RebalanceEngine
@@ -46,6 +47,44 @@ def _next_business_day_on_or_after(d: date) -> date:
     while not _is_business_day(d):
         d += timedelta(days=1)
     return d
+
+
+def _previous_business_day(d: date) -> date:
+    """주어진 날짜 직전의 영업일"""
+    d -= timedelta(days=1)
+    while not _is_business_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def _find_stale_prices(db, tickers, expected_date: date) -> list:
+    """expected_date 시세가 아직 DB에 없는 종목 목록 [(ticker, 마지막 시세일 또는 None)] (CASH 제외)
+
+    시세 수집이 조용히 멈추면 엔진들이 "가장 최근 가격"이라며 몇 주 묵은 값을 그대로 쓰게 되므로,
+    신호 계산/스냅샷 전에 이 함수로 신선도를 확인한다.
+    """
+    stale = []
+    for ticker in tickers:
+        if ticker == "CASH":
+            continue
+        latest = db.query(func.max(ETFPrice.price_date)).filter(ETFPrice.ticker == ticker).scalar()
+        if isinstance(latest, datetime):
+            latest = latest.date()
+        if latest is None or latest < expected_date:
+            stale.append((ticker, latest))
+    return stale
+
+
+def _format_stale_lines(stale: list) -> str:
+    """묵은 시세 종목 목록을 텔레그램 본문용 문자열로 변환"""
+    lines = []
+    for ticker, latest in stale:
+        etf_info = IRP_PORTFOLIO.get(ticker) or PENSION_ETFS.get(ticker, {})
+        name = etf_info.get('name', ticker)
+        for ch in "_*[]`":  # 텔레그램 Markdown 특수문자 제거
+            name = name.replace(ch, " ")
+        lines.append(f"- {name} ({ticker}): 마지막 시세 {latest.isoformat() if latest else '없음'}")
+    return "\n".join(lines)
 
 
 def _rebalance_check_dates(year: int) -> List[date]:
@@ -249,8 +288,29 @@ class JobScheduler:
                     "collected_count": stats['success'],
                 })
 
-            # 포트폴리오 스냅샷 저장 (종가 수집 직후, 같은 db 세션)
-            self._job_snapshot_portfolio(db)
+            # 수집 실패 감지: 영업일 수집 직후인데 오늘 날짜 시세가 없는 종목이 있으면 알림
+            stale = _find_stale_prices(db, all_tickers, today)
+            if stale:
+                self._alert_stale_prices(
+                    db,
+                    title="시세 수집 실패 알림",
+                    intro=(
+                        f"{today.isoformat()} 종가 수집 후에도 오늘 시세가 없는 종목이 "
+                        f"{len(stale)}개 있습니다. (수집 결과: 성공 {stats['success']}, "
+                        f"실패 {stats['fail']}, 건너뜀 {stats['skip']})"
+                    ),
+                    stale=stale,
+                    outro=(
+                        "데이터 소스 장애/변경이거나 휴장일 캘린더에 없는 임시 휴장일일 수 있습니다.\n"
+                        "묵은 가격이 기록되지 않도록 오늘 포트폴리오 스냅샷은 저장하지 않았습니다."
+                    ),
+                    event="price_collection_failed",
+                    check_date=today,
+                )
+                logger.warning(f"[Portfolio Snapshot] Skipped - stale prices for {[t for t, _ in stale]}")
+            else:
+                # 포트폴리오 스냅샷 저장 (종가 수집 직후, 같은 db 세션)
+                self._job_snapshot_portfolio(db)
 
         except Exception as e:
             logger.error(f"[Price Collection] Error: {type(e).__name__}: {e}", exc_info=True)
@@ -258,6 +318,25 @@ class JobScheduler:
             if db:
                 db.close()
             logger.info("=" * 70)
+
+    def _alert_stale_prices(self, db, title: str, intro: str, stale: list, outro: str, event: str, check_date: date):
+        """묵은 시세 알림 (텔레그램 + 웹훅). 알림 실패가 본 작업을 죽이지 않도록 예외는 삼킨다."""
+        logger.error(f"[Stale Prices] {title} - {[(t, str(d)) for t, d in stale]}")
+        try:
+            message = f"{intro}\n\n{_format_stale_lines(stale)}\n\n{outro}"
+            notifier = TelegramNotificationManager(db)
+            notifier.send_telegram_message(title, message, notification_type=event)
+
+            webhook = WebhookNotifier(db)
+            webhook.send_webhook(event, {
+                "date": check_date.isoformat(),
+                "stale": [
+                    {"ticker": t, "latest_price_date": d.isoformat() if d else None}
+                    for t, d in stale
+                ],
+            })
+        except Exception as e:
+            logger.error(f"[Stale Prices] Alert failed: {type(e).__name__}: {e}", exc_info=True)
 
     def _job_snapshot_portfolio(self, db):
         """계좌별 포트폴리오 스냅샷 저장 (매일 종가 수집 직후 호출, 별도 스케줄 등록 안 함)"""
@@ -353,19 +432,56 @@ class JobScheduler:
         """모멘텀 계산 작업 (매월 첫 영업일에만 실행)"""
         today = date.today()
         expected_day = _first_business_day_of_month(today.year, today.month)
-        if today != expected_day:
+        if today < expected_day or not _is_business_day(today):
             logger.info(
-                f"[Momentum Calculation] Skipped - {today} is not this month's first business day "
-                f"(expected {expected_day})"
+                f"[Momentum Calculation] Skipped - {today} is before this month's first business day "
+                f"or not a business day (expected {expected_day})"
             )
             return
-
-        logger.info("=" * 70)
-        logger.info(f"[Momentum Calculation] Started - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         db = None
         try:
             db = next(get_db())
+
+            # 첫 영업일이 지났으면, 이번 달 계산이 아직 없을 때만 밀린 계산을 수행
+            # (첫 영업일에 묵은 시세로 보류됐거나 서비스가 꺼져 있었던 경우의 자동 복구)
+            if today != expected_day:
+                month_start = date(today.year, today.month, 1)
+                already = db.query(MomentumScore).filter(MomentumScore.calc_date >= month_start).first()
+                if already:
+                    logger.info(
+                        f"[Momentum Calculation] Skipped - {today} is not this month's first business day "
+                        f"(expected {expected_day}) and this month is already calculated"
+                    )
+                    return
+                logger.warning(
+                    f"[Momentum Calculation] Catch-up - no scores for this month yet "
+                    f"(expected {expected_day}, running on {today})"
+                )
+
+            logger.info("=" * 70)
+            logger.info(f"[Momentum Calculation] Started - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # 묵은 시세 가드: 09시 계산이므로 직전 영업일 종가까지는 있어야 한다
+            required_date = _previous_business_day(today)
+            stale = _find_stale_prices(db, PENSION_ETFS.keys(), required_date)
+            if stale:
+                self._alert_stale_prices(
+                    db,
+                    title="모멘텀 계산 보류 알림",
+                    intro=(
+                        f"{today.isoformat()} 모멘텀 계산을 보류했습니다. "
+                        f"{required_date.isoformat()} 종가가 없는 종목이 {len(stale)}개 있습니다."
+                    ),
+                    stale=stale,
+                    outro=(
+                        "묵은 가격으로 신호를 내지 않기 위한 조치입니다.\n"
+                        "시세가 채워지면 다음 영업일 09시에 자동으로 다시 계산합니다."
+                    ),
+                    event="momentum_skipped_stale_prices",
+                    check_date=today,
+                )
+                return
 
             # 모멘텀 엔진 생성
             momentum_engine = MomentumEngine(db)
@@ -377,7 +493,6 @@ class JobScheduler:
 
             # 모든 종목의 모멘텀 계산 및 저장
             all_scores = []
-            from config import PENSION_ETFS
             for ticker in PENSION_ETFS.keys():
                 score = momentum_engine.calculate_momentum_score(ticker, calc_date)
                 score['is_selected'] = ticker in selected_tickers
@@ -496,6 +611,27 @@ class JobScheduler:
         db = None
         try:
             db = next(get_db())
+
+            # 묵은 시세 가드: 09시 체크이므로 직전 영업일 종가까지는 있어야 한다
+            required_date = _previous_business_day(today)
+            stale = _find_stale_prices(db, IRP_PORTFOLIO.keys(), required_date)
+            if stale:
+                self._alert_stale_prices(
+                    db,
+                    title="리밸런싱 체크 보류 알림",
+                    intro=(
+                        f"{today.isoformat()} 반기 리밸런싱 체크를 보류했습니다. "
+                        f"{required_date.isoformat()} 종가가 없는 종목이 {len(stale)}개 있습니다."
+                    ),
+                    stale=stale,
+                    outro=(
+                        "묵은 가격으로 신호를 내지 않기 위한 조치입니다.\n"
+                        "이 체크는 자동으로 재시도되지 않으니, 시세 복구 후 수동으로 다시 실행해야 합니다."
+                    ),
+                    event="rebalance_skipped_stale_prices",
+                    check_date=today,
+                )
+                return
 
             # 리밸런싱 엔진 생성 (기본 1000만원 포트폴리오)
             rebalance_engine = RebalanceEngine(db)
