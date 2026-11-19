@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from typing import Optional
 from database import UserPortfolio, ETFPrice
 from config import IRP_PORTFOLIO, PENSION_ETFS
 
@@ -24,8 +25,28 @@ class PortfolioEngine:
             .first()
         return latest.close_price if latest else 0.0
 
+    def get_previous_close(self, ticker: str) -> Optional[float]:
+        """최신 가격 이전(전일 거래일)의 종가. 데이터가 1개뿐이면 None."""
+        rows = self.db.query(ETFPrice).filter(ETFPrice.ticker == ticker)\
+            .order_by(ETFPrice.price_date.desc()).limit(2).all()
+        return rows[1].close_price if len(rows) == 2 else None
+
     def calculate_holding_performance(self, ticker: str, quantity: float, avg_buy_price: float) -> dict:
-        """개별 종목 수익률 계산"""
+        """개별 종목 수익률 계산 (현금은 quantity=금액, avg_buy_price=1)"""
+        # 현금 특별 처리
+        if ticker == "CASH":
+            cash_amount = quantity  # quantity = 현금액
+            return {
+                "ticker": ticker,
+                "quantity": cash_amount,
+                "avg_buy_price": 1,
+                "current_price": 1,
+                "cost_value": cash_amount,
+                "current_value": cash_amount,
+                "unrealized_return": 0,
+                "unrealized_return_pct": 0,
+            }
+
         current_price = self.get_latest_price(ticker)
 
         if current_price == 0 or avg_buy_price == 0:
@@ -88,6 +109,19 @@ class PortfolioEngine:
                 "holdings": [],
             }
 
+        # 연금저축용 Top2 선택 정보 조회
+        selected_tickers = set()
+        if account_type == "연금저축" or not account_type:
+            from database import MomentumScore
+            latest = self.db.query(MomentumScore).order_by(MomentumScore.calc_date.desc()).first()
+            if latest:
+                calc_date = latest.calc_date
+                selected = self.db.query(MomentumScore).filter(
+                    MomentumScore.calc_date == calc_date,
+                    MomentumScore.is_selected == True
+                ).all()
+                selected_tickers = {s.ticker for s in selected}
+
         holdings_data = []
         total_cost = 0
         total_value = 0
@@ -98,6 +132,9 @@ class PortfolioEngine:
                 holding.quantity,
                 holding.avg_buy_price
             )
+
+            performance["account_type"] = holding.account_type
+            performance["is_selected"] = holding.ticker in selected_tickers
 
             # ETF 정보 추가
             etf_info = IRP_PORTFOLIO.get(holding.ticker) or PENSION_ETFS.get(holding.ticker)
@@ -133,8 +170,19 @@ class PortfolioEngine:
             .first()
 
         if existing:
-            logger.warning(f"Portfolio holding already exists: {ticker} in {account_type}")
-            return {"error": "Already exists"}
+            if existing.is_active:
+                logger.warning(f"Portfolio holding already exists: {ticker} in {account_type}")
+                return {"error": "Already exists"}
+
+            # 이전에 삭제(비활성화)된 종목 재활성화
+            existing.quantity = quantity
+            existing.avg_buy_price = avg_buy_price
+            existing.is_active = True
+            existing.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(existing)
+            logger.info(f"Portfolio holding reactivated: {ticker} x{quantity} @ {avg_buy_price} ({account_type})")
+            return self.calculate_holding_performance(ticker, quantity, avg_buy_price)
 
         holding = UserPortfolio(
             ticker=ticker,

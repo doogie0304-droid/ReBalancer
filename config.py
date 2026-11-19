@@ -47,28 +47,47 @@ REBALANCE_BAND_PCT = 5.0
 REBALANCE_CHECK_DATES = [("01", "01"), ("07", "01")]
 REBALANCE_CHECK_HOUR = 9
 
+# 연저펀 Top2 밴드형 재조정 파라미터 (Top2 각 50% 목표, +/-5%p 이탈 시 신호)
+PENSION_REBALANCE_BAND_PCT = 5.0
+
 # 크롤링 파라미터
 CRAWL_SCHEDULE_HOUR = 18
 CRAWL_RETRY_COUNT = 3
 CRAWL_RETRY_DELAY = 5
 
 # 스케줄 설정
-MOMENTUM_SCHEDULE_MONTH_DAY = 2
+# 모멘텀 계산: 매월 1일 09:00, 단 휴장일이면 다음 영업일로 순연 (scheduler.py의 _job_calculate_momentum에서 매일 체크)
 MOMENTUM_SCHEDULE_HOUR = 9
 
 # 알림 설정
-NOTIFICATION_CHANNELS = ["console", "telegram"]
-FCM_API_KEY = os.getenv("FCM_API_KEY", "")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "")
+NOTIFICATION_CHANNELS = ["console", "telegram", "webhook"]
+BASE_URL = os.getenv("BASE_URL", "http://192.168.0.46:8001")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# 관리 종목 (연금저축펀드)
+# 웹훅 알림 (범용 자동화 연동용 - n8n/Zapier 등). URL 미설정 시 전송 자체를 스킵함
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBHOOK_TIMEOUT_SECONDS = int(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "10"))
+
+# 외부 노출 뷰 서버(8001)의 포트폴리오 편집 폼 인증 (momentum_view_server.py)
+# PIN 입력 후 서명된 쿠키로 30일간 로그인 유지 (매번 재입력 불필요)
+PORTFOLIO_EDIT_PIN = os.getenv("PORTFOLIO_EDIT_PIN", "")
+PORTFOLIO_SESSION_SECRET = os.getenv("PORTFOLIO_SESSION_SECRET", "")
+
+# 공공데이터포털 - 한국천문연구원 특일 정보 API (휴장일 캘린더 자동 점검용)
+HOLIDAY_API_KEY = os.getenv("HOLIDAY_API_KEY", "")
+# 발급일 2026-07-08, 유효기간 24개월 -> 갱신은 만료일(2028-07-08) 이전에 할 것
+# 키 갱신 시 이 날짜도 함께 업데이트
+HOLIDAY_API_KEY_EXPIRES = "2028-07-08"
+
+# 관리 종목 (연금저축펀드 - 듀얼 모멘텀 전략)
 PENSION_ETFS = {
-    "379800": {"name": "KODEX 200", "type": "domestic_stock"},
-    "360750": {"name": "TIGER 미국S&P500", "type": "foreign_stock"},
+    "379800": {"name": "KODEX 미국S&P500", "type": "foreign_stock"},
+    "379810": {"name": "KODEX 미국나스닥100", "type": "foreign_stock"},
     "402970": {"name": "ACE 미국배당다우존스", "type": "foreign_stock"},
     "449170": {"name": "TIGER KOFR금리액티브(합성)", "type": "safe_asset"},
+    "CASH": {"name": "현금", "type": "cash"},
 }
 
 # IRP 포트폴리오 (고정비중)
@@ -81,6 +100,7 @@ IRP_PORTFOLIO = {
     "0072R0": {"name": "TIGER KRX금현물", "target_weight": 15.0},
     "453850": {"name": "ACE 미국30년국채액티브(H)", "target_weight": 15.0},
     "214980": {"name": "KODEX 단기채권PLUS", "target_weight": 15.0},
+    "CASH": {"name": "현금", "target_weight": 0.0},
 }
 
 # 로깅 설정
@@ -100,10 +120,24 @@ NAVER_CRAWLER_SELECTORS = {
 MARKET_OPEN_HOUR = 9
 MARKET_CLOSE_HOUR = 16
 
-# 한국 증시 휴장일
+# 한국 증시 휴장일 (설날/추석 등 음력 공휴일이 매년 바뀌므로 연초에 갱신 필요)
 MARKET_HOLIDAYS = [
     "2024-01-01", "2024-02-09", "2024-02-10", "2024-02-11", "2024-02-12",
     "2024-03-01", "2024-04-10", "2024-05-05", "2024-05-15", "2024-06-06",
     "2024-08-15", "2024-09-16", "2024-09-17", "2024-09-18", "2024-10-03",
     "2024-10-09", "2024-12-25",
+    "2025-01-01", "2025-01-28", "2025-01-29", "2025-01-30", "2025-03-03",
+    "2025-05-01", "2025-05-05", "2025-05-06", "2025-06-06", "2025-08-15",
+    "2025-10-03", "2025-10-06", "2025-10-07", "2025-10-08", "2025-10-09",
+    "2025-12-25", "2025-12-31",
+    "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-03-02",
+    "2026-05-01", "2026-05-05", "2026-05-25", "2026-06-06", "2026-07-17",
+    "2026-08-15", "2026-08-17", "2026-09-24", "2026-09-25", "2026-09-26",
+    "2026-10-03", "2026-10-05", "2026-10-09", "2026-12-25", "2026-12-31",
+    # 제헌절(7/17)은 2026-02-10 공포, 2026-05-11 시행된 개정으로 19년 만에
+    # 법정 공휴일로 재지정됨 (2027년 이후도 매년 7/17 추가 필요)
+    # 2027 상반기 (공공데이터포털 특일정보 API로 확인, 2026-07-08)
+    "2027-01-01", "2027-02-06", "2027-02-07", "2027-02-08", "2027-02-09",
+    "2027-03-01", "2027-05-01", "2027-05-03", "2027-05-05", "2027-05-13",
+    "2027-06-06",
 ]

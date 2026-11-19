@@ -1,0 +1,17 @@
+[Unit]
+Description=ReBalancer Momentum View (Read-Only, externally exposed)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=doogie_admin
+WorkingDirectory=/volume1/rebalancer
+Environment="PATH=/volume1/rebalancer/venv/bin"
+ExecStart=/volume1/rebalancer/venv/bin/python /volume1/rebalancer/momentum_view_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

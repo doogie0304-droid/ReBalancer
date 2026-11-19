@@ -31,27 +31,26 @@ class MomentumEngine:
             return 0.0
         return ((end_price - start_price) / start_price) * 100
 
-    def get_moving_average(self, ticker: str, calc_date: date, period: int = 10) -> float:
-        """이동평균 계산"""
-        start_date = calc_date - timedelta(days=period * 2)  # 충분한 기간 조회
+    def get_moving_average(self, ticker: str, calc_date: date, period_months: int = MA_PERIOD_MONTHS) -> float:
+        """N개월 이동평균 계산 (당월 포함, 매 30일 간격 스냅샷 종가의 평균)"""
+        prices = []
+        for i in range(period_months):
+            snapshot_date = calc_date - timedelta(days=i * 30)
+            price = self.get_price_on_date(ticker, snapshot_date)
+            if price is not None:
+                prices.append(price)
 
-        prices = self.db.query(ETFPrice).filter(
-            ETFPrice.ticker == ticker,
-            ETFPrice.price_date >= start_date,
-            ETFPrice.price_date <= calc_date
-        ).order_by(ETFPrice.price_date.desc()).limit(period).all()
-
-        if not prices or len(prices) < period:
+        if len(prices) < period_months:
             return 0.0
 
-        avg = sum(p.close_price for p in prices) / len(prices)
-        return avg
+        return sum(prices) / len(prices)
 
     def calculate_momentum_score(self, ticker: str, calc_date: date):
         """모멘텀 스코어 계산"""
         result = {
             'ticker': ticker,
             'calc_date': calc_date,
+            'current_price': 0.0,
             'r3': 0.0,
             'r6': 0.0,
             'r12': 0.0,
@@ -66,6 +65,8 @@ class MomentumEngine:
             if current_price is None:
                 logger.warning(f"No price data for {ticker} on {calc_date}")
                 return result
+
+            result['current_price'] = current_price
 
             # 3개월(약 60일) 전 가격
             date_3m = calc_date - timedelta(days=60)
@@ -82,8 +83,8 @@ class MomentumEngine:
             price_12m = self.get_price_on_date(ticker, date_12m)
             result['r12'] = self.calculate_return(price_12m, current_price) if price_12m else 0.0
 
-            # 10일 이동평균
-            result['ma10'] = self.get_moving_average(ticker, calc_date, period=10)
+            # MA_PERIOD_MONTHS개월 이동평균 (절대모멘텀 필터용)
+            result['ma10'] = self.get_moving_average(ticker, calc_date, period_months=MA_PERIOD_MONTHS)
 
             # 가중 평균 계산
             weighted_score = (
@@ -92,7 +93,13 @@ class MomentumEngine:
                 result['r12'] * MOMENTUM_WEIGHTS['R12']
             )
             result['weighted_score'] = weighted_score
-            result['passed_condition'] = weighted_score > MOMENTUM_POSITIVE_THRESHOLD
+
+            # 가중 모멘텀 점수가 양(+)이고, 현재가가 MA10 위에 있어야 통과 (MA10=0.0은 데이터 부족으로 미통과 처리)
+            result['passed_condition'] = (
+                weighted_score > MOMENTUM_POSITIVE_THRESHOLD
+                and result['ma10'] > 0
+                and current_price > result['ma10']
+            )
 
             logger.debug(f"{ticker}: r3={result['r3']:.2f}%, r6={result['r6']:.2f}%, r12={result['r12']:.2f}%, weighted={weighted_score:.2f}%")
 

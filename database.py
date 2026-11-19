@@ -2,7 +2,7 @@
 """ReBalancer - 데이터베이스 ORM 모델"""
 
 import logging
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Boolean, Text
+from sqlalchemy import create_engine, Column, Integer, String, Float, Double, Date, DateTime, Boolean, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from config import DATABASE_URL
@@ -40,20 +40,21 @@ class MomentumScore(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 class RebalanceSignal(Base):
-    """IRP 리밸런싱 신호"""
+    """리밸런싱 신호 (IRP 밴드 체크 + 연저펀 Top2 밴드 체크)"""
     __tablename__ = "rebalance_signals"
 
     id = Column(Integer, primary_key=True, index=True)
     ticker = Column(String(20), index=True, nullable=False)
+    account_type = Column(String(20), default="IRP")  # "IRP" 또는 "연금저축" (같은 티커가 두 계좌에 겹칠 수 있어 구분 필요)
     signal_date = Column(Date, index=True, nullable=False)
     target_weight = Column(Float)
     current_weight = Column(Float)
     weight_diff = Column(Float)
     current_price = Column(Float)
-    total_assets = Column(Float)
-    target_amount = Column(Float)
-    current_amount = Column(Float)
-    rebalance_amount = Column(Float)
+    total_assets = Column(Double)
+    target_amount = Column(Double)
+    current_amount = Column(Double)
+    rebalance_amount = Column(Double)
     rebalance_quantity = Column(Float)
     action = Column(String(10))
     needs_rebalance = Column(Boolean)
@@ -120,6 +121,28 @@ class SignalAccuracy(Base):
     accuracy_score = Column(Float)  # 0.0 ~ 1.0, 최종 정확도 점수
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class PortfolioSnapshot(Base):
+    """계좌별 일별 평가금액 스냅샷 (오늘부터 신규 적재, 과거 소급 없음)"""
+    __tablename__ = "portfolio_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_date = Column(Date, index=True, nullable=False)
+    account_type = Column(String(20), index=True, nullable=False)  # "IRP" 또는 "연금저축"
+    total_value = Column(Double, nullable=False)
+    total_cost = Column(Double, nullable=False)  # 참고/디버그용
+    created_at = Column(DateTime, default=datetime.now)
+
+class CashFlow(Base):
+    """수동 입력 입출금 이력 (양수=입금, 음수=출금). 수정/삭제 가능."""
+    __tablename__ = "cash_flows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    flow_date = Column(Date, index=True, nullable=False)
+    account_type = Column(String(20), index=True, nullable=False)
+    amount = Column(Double, nullable=False)
+    memo = Column(String(200))
+    created_at = Column(DateTime, default=datetime.now)
 
 def init_db():
     """데이터베이스 초기화"""

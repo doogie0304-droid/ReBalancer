@@ -10,3 +10,6 @@ __pycache__/
 
 # IDE
 .idea/
+
+# Local backups of files replaced during NAS sync
+*.local_old_*

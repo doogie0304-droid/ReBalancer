@@ -172,6 +172,8 @@ async def get_latest_momentum(db: Session = Depends(get_db)) -> Dict:
         logger.error(f"모멘텀 조회 오류: {e}")
         raise HTTPException(status_code=500, detail="모멘텀 데이터 조회 실패")
 
+# /momentum/view는 momentum_view_server.py(8001번, 외부 노출용 읽기 전용 서버)로 분리됨
+
 # ==================== Rebalance ====================
 
 @app.get("/api/v1/rebalance/latest")
@@ -460,17 +462,19 @@ async def trigger_calculate_momentum(db: Session = Depends(get_db)) -> Dict:
         momentum_engine = MomentumEngine(db)
         calc_date = date.today()
 
+        # TOP N 선정
+        top_n_scores = momentum_engine.select_top_n_passed(calc_date, n=2)
+        selected_tickers = {score['ticker'] for score in top_n_scores}
+
         # 모든 종목의 모멘텀 계산
         all_scores = []
         for ticker in PENSION_ETFS.keys():
             score = momentum_engine.calculate_momentum_score(ticker, calc_date)
+            score['is_selected'] = ticker in selected_tickers
             all_scores.append(score)
 
         # 스코어 저장
         saved_count = momentum_engine.save_momentum_scores(all_scores, calc_date)
-
-        # TOP N 선정
-        top_n_scores = momentum_engine.select_top_n_passed(calc_date, n=2)
 
         return {
             "status": "ok",
@@ -529,6 +533,45 @@ async def trigger_check_rebalance(db: Session = Depends(get_db)) -> Dict:
     except Exception as e:
         logger.error(f"수동 리밸런싱 체크 오류: {e}")
         raise HTTPException(status_code=500, detail=f"리밸런싱 체크 실패: {str(e)}")
+
+@app.post("/api/v1/jobs/check-pension-rebalance")
+async def trigger_check_pension_rebalance(db: Session = Depends(get_db)) -> Dict:
+    """즉시 연저펀 Top2 밴드형(+/-5%p) 재조정 체크 실행"""
+    try:
+        logger.info("⚡ 수동 연저펀 밴드 재조정 체크 시작")
+
+        rebalance_engine = RebalanceEngine(db)
+        signal_date = date.today()
+
+        signals = rebalance_engine.calculate_pension_rebalance_signal(signal_date)
+        saved_count = rebalance_engine.save_rebalance_signals(signals)
+        needs_rebalance_count = sum(1 for s in signals if s['needs_rebalance'])
+
+        signal_details = [
+            {
+                "ticker": s['ticker'],
+                "action": s['action'],
+                "current_weight": round(s['current_weight'], 2),
+                "target_weight": round(s['target_weight'], 2),
+                "weight_diff": round(s['weight_diff'], 2),
+                "needs_rebalance": s['needs_rebalance'],
+                "rebalance_amount": round(s['rebalance_amount'], 0)
+            }
+            for s in signals
+        ]
+
+        return {
+            "status": "ok",
+            "message": "연저펀 밴드 재조정 체크 완료",
+            "signal_date": signal_date.isoformat(),
+            "total_signals": len(signals),
+            "needs_rebalance_count": needs_rebalance_count,
+            "saved_count": saved_count,
+            "signals": signal_details
+        }
+    except Exception as e:
+        logger.error(f"수동 연저펀 밴드 재조정 체크 오류: {e}")
+        raise HTTPException(status_code=500, detail=f"연저펀 밴드 재조정 체크 실패: {str(e)}")
 
 # ==================== Signal Accuracy ====================
 
