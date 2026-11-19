@@ -11,6 +11,7 @@ import hashlib
 import logging
 import time
 from datetime import date, datetime, timezone
+from html import escape as _html_escape
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, Request, status
@@ -55,8 +56,25 @@ def _has_valid_session(request: Request) -> bool:
     return bool(token) and _is_valid_session_token(token)
 
 
+def _esc(value) -> str:
+    """HTML 본문/속성에 넣는 모든 가변 값에 적용 (XSS 방지)"""
+    return _html_escape("" if value is None else str(value), quote=True)
+
+
+# 쿼리스트링으로 받은 자유 문자열은 화면에 그대로 찍지 않고, 코드 -> 고정 문구로만 변환한다
+_LOGIN_ERRORS = {"pin": "PIN이 올바르지 않습니다"}
+_DEPOSIT_MESSAGES = {
+    "saved": "저장되었습니다",
+    "updated": "수정되었습니다",
+    "deleted": "삭제되었습니다",
+    "invalid": "입력값이 올바르지 않습니다",
+}
+_PORTFOLIO_ACCOUNTS = ("연금저축", "IRP")
+
+
 def _login_page_html(error: str = "") -> str:
-    error_html = f'<p class="error">{error}</p>' if error else ""
+    error_text = _LOGIN_ERRORS.get(error, "")
+    error_html = f'<p class="error">{_esc(error_text)}</p>' if error_text else ""
     return f"""
     <html>
     <head>
@@ -118,7 +136,7 @@ async def view_latest_momentum(db: Session = Depends(get_db)) -> str:
             return f'<td class="{cls}">{value:+.2f}%</td>'
 
         rows_html += (
-            f"<tr{row_class}><td>{name}</td><td>{s.ticker}</td><td>{price}원</td>"
+            f"<tr{row_class}><td>{_esc(name)}</td><td>{_esc(s.ticker)}</td><td>{price}원</td>"
             f"{ret_cell(s.r3)}{ret_cell(s.r6)}{ret_cell(s.r12)}"
             f"<td>{s.weighted_score:.2f}</td><td>{ma10}원</td>"
             f"<td class=\"{pass_cls}\">{pass_mark}</td><td>{mark}</td></tr>"
@@ -160,7 +178,7 @@ _ALL_ETFS = {**PENSION_ETFS, **IRP_PORTFOLIO}
 
 def _account_options_html(selected_account: str) -> str:
     opts = ""
-    for value in ("연금저축", "IRP"):
+    for value in _PORTFOLIO_ACCOUNTS:
         sel = " selected" if value == selected_account else ""
         opts += f"<option value=\"{value}\"{sel}>{value}</option>"
     return opts
@@ -181,7 +199,7 @@ def _render_portfolio_edit_page(
 
     edit_holding = None
     tables_html = ""
-    for account_type in ("연금저축", "IRP"):
+    for account_type in _PORTFOLIO_ACCOUNTS:
         holdings = holdings_by_account.get(account_type, [])
         if not holdings:
             continue
@@ -218,7 +236,7 @@ def _render_portfolio_edit_page(
             # 현금 특별 처리
             if h["ticker"] == "CASH":
                 rows_html += (
-                    f"<tr><td>{h.get('name', h['ticker'])}</td>"
+                    f"<tr><td>{_esc(h.get('name', h['ticker']))}</td>"
                     f"<td class=\"weight-cell\"><span>{weight_pct:.1f}%</span>"
                     f"<span class=\"diff {diff_cls}\">({diff:+.1f}%p)</span></td>"
                     f"<td colspan=\"3\"></td>"
@@ -226,17 +244,17 @@ def _render_portfolio_edit_page(
                     f"<td>{h['current_value']:,.0f}</td>"
                     f"<td>-</td>"
                     f"<td>"
-                    f"<a href=\"/portfolio/edit?edit_ticker={h['ticker']}&edit_account={quote(account_type)}\">"
+                    f"<a href=\"/portfolio/edit?edit_ticker={quote(str(h['ticker']), safe='')}&amp;edit_account={quote(account_type)}\">"
                     f"<button type=\"button\">수정</button></a> "
                     f"<form method=\"post\" action=\"/portfolio/edit/delete\" style=\"display:inline\" "
                     f"onsubmit=\"return confirm('삭제하시겠습니까?')\">"
-                    f"<input type=\"hidden\" name=\"ticker\" value=\"{h['ticker']}\">"
-                    f"<input type=\"hidden\" name=\"account_type\" value=\"{account_type}\">"
+                    f"<input type=\"hidden\" name=\"ticker\" value=\"{_esc(h['ticker'])}\">"
+                    f"<input type=\"hidden\" name=\"account_type\" value=\"{_esc(account_type)}\">"
                     f"<button type=\"submit\">삭제</button></form></td></tr>"
                 )
             else:
                 rows_html += (
-                    f"<tr><td>{h.get('name', h['ticker'])}</td>"
+                    f"<tr><td>{_esc(h.get('name', h['ticker']))}</td>"
                     f"<td class=\"weight-cell\"><span>{weight_pct:.1f}%</span>"
                     f"<span class=\"diff {diff_cls}\">({diff:+.1f}%p)</span></td>"
                     f"<td>{h['quantity']:g}</td>"
@@ -245,12 +263,12 @@ def _render_portfolio_edit_page(
                     f"<td>{h['current_value']:,.0f}</td>"
                     f"<td class=\"{cls}\">{h['unrealized_return_pct']:+.2f}%</td>"
                     f"<td>"
-                    f"<a href=\"/portfolio/edit?edit_ticker={h['ticker']}&edit_account={quote(account_type)}\">"
+                    f"<a href=\"/portfolio/edit?edit_ticker={quote(str(h['ticker']), safe='')}&amp;edit_account={quote(account_type)}\">"
                     f"<button type=\"button\">수정</button></a> "
                     f"<form method=\"post\" action=\"/portfolio/edit/delete\" style=\"display:inline\" "
                     f"onsubmit=\"return confirm('삭제하시겠습니까?')\">"
-                    f"<input type=\"hidden\" name=\"ticker\" value=\"{h['ticker']}\">"
-                    f"<input type=\"hidden\" name=\"account_type\" value=\"{account_type}\">"
+                    f"<input type=\"hidden\" name=\"ticker\" value=\"{_esc(h['ticker'])}\">"
+                    f"<input type=\"hidden\" name=\"account_type\" value=\"{_esc(account_type)}\">"
                     f"<button type=\"submit\">삭제</button></form></td></tr>"
                 )
 
@@ -262,7 +280,7 @@ def _render_portfolio_edit_page(
         )
 
         tables_html += f"""
-        <h3>{account_type}</h3>
+        <h3>{_esc(account_type)}</h3>
         <div class="table-scroll">
         <table>
             <tr><th>종목명</th><th>비중</th><th>수량</th><th>평단가</th><th>현재가</th><th>매입금액</th><th>평가금액</th><th>수익률</th><th></th></tr>
@@ -275,7 +293,7 @@ def _render_portfolio_edit_page(
         opts = ""
         for ticker, info in _ALL_ETFS.items():
             sel = " selected" if ticker == selected_ticker else ""
-            opts += f"<option value=\"{ticker}\"{sel}>{info['name']} ({ticker})</option>"
+            opts += f"<option value=\"{_esc(ticker)}\"{sel}>{_esc(info['name'])} ({_esc(ticker)})</option>"
         return opts
 
     form_title = "수정" if edit_holding else "추가 / 수정"
@@ -284,7 +302,7 @@ def _render_portfolio_edit_page(
     ticker_select = ticker_options_html(edit_holding["ticker"] if edit_holding else "")
     account_select = _account_options_html(edit_holding.get("account_type", "") if edit_holding else "")
 
-    message_html = f'<p class="msg">{message}</p>' if message else ""
+    message_html = f'<p class="msg">{_esc(message)}</p>' if message else ""
 
     return f"""
     <html>
@@ -381,7 +399,7 @@ async def portfolio_login_page(error: str = "") -> str:
 async def portfolio_login_submit(pin: str = Form(...)):
     if not PORTFOLIO_EDIT_PIN or not hmac.compare_digest(pin, PORTFOLIO_EDIT_PIN):
         return RedirectResponse(
-            url=f"/portfolio/login?error={quote('PIN이 올바르지 않습니다')}",
+            url="/portfolio/login?error=pin",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     response = RedirectResponse(url="/portfolio/edit", status_code=status.HTTP_303_SEE_OTHER)
@@ -419,6 +437,10 @@ async def portfolio_edit_upsert(
     if not _has_valid_session(request):
         return RedirectResponse(url="/portfolio/login", status_code=status.HTTP_303_SEE_OTHER)
 
+    # 등록된 종목/계좌만 저장 (임의 문자열이 DB에 들어가 화면에 출력되는 것을 차단)
+    if ticker not in _ALL_ETFS or account_type not in _PORTFOLIO_ACCOUNTS:
+        return RedirectResponse(url="/portfolio/edit", status_code=status.HTTP_303_SEE_OTHER)
+
     engine = PortfolioEngine(db)
     existing = engine.get_portfolio_by_ticker(ticker, account_type)
     if existing:
@@ -453,7 +475,7 @@ def _render_asset_trend_chart(default_account: str) -> str:
     """ApexCharts 캔들스틱(주간/월간/연간 스위칭, 계좌 드롭다운)을 렌더링.
     데이터는 /report/ohlc에서 비동기로 가져온다."""
     account_options = "".join(
-        f'<option value="{acc}"{" selected" if acc == default_account else ""}>{acc}</option>'
+        f'<option value="{_esc(acc)}"{" selected" if acc == default_account else ""}>{_esc(acc)}</option>'
         for acc in ACCOUNT_TYPES
     )
     return f"""
@@ -539,7 +561,7 @@ def _render_comprehensive_review_section(engine: PerformanceReportEngine) -> str
         mdd = engine.get_mdd(acc)
 
         cards_html += f"""
-        <h3>{acc}</h3>
+        <h3>{_esc(acc)}</h3>
         <table class="summary">
             <tr><td>순입금 대비 수익률</td>{_pct_cell(cum_return)}</tr>
             <tr><td>연평균 수익률 (단순)</td>{_pct_cell(annual['simple'])}</tr>
@@ -573,7 +595,7 @@ def _render_performance_report_page(db: Session, account_type: str, year: int, m
             breakdown_rows = ""
             for m in report["monthly_breakdown"]:
                 breakdown_rows += (
-                    f"<tr><td>{m['start_date'][:7]}</td>"
+                    f"<tr><td>{_esc(m['start_date'][:7])}</td>"
                     f"{_pct_cell(m['total_growth_pct'])}"
                     f"{_pct_cell(m['deposit_growth_pct'])}"
                     f"{_pct_cell(m['investment_return_pct'])}</tr>"
@@ -596,7 +618,7 @@ def _render_performance_report_page(db: Session, account_type: str, year: int, m
         net_deposits = f"{report['net_deposits']:+,.0f}"
 
         sections_html += f"""
-        <h3>{acc} — {period_label}</h3>
+        <h3>{_esc(acc)} — {period_label}</h3>
         <table class="summary">
             <tr><td>기초 평가금액</td><td>{start_value}</td></tr>
             <tr><td>기말 평가금액</td><td>{end_value}</td></tr>
@@ -649,9 +671,9 @@ def _render_performance_report_page(db: Session, account_type: str, year: int, m
     <body>
         <h2>성과 리포트</h2>
         <div class="nav">
-            <a href="{prev_url}">◀ 이전</a>
-            <a href="{next_url}">다음 ▶</a>
-            <a href="{toggle_url}">{toggle_label}</a>
+            <a href="{_esc(prev_url)}">◀ 이전</a>
+            <a href="{_esc(next_url)}">다음 ▶</a>
+            <a href="{_esc(toggle_url)}">{toggle_label}</a>
             <a href="/report/deposit">입금 기록</a>
         </div>
         <h2>Summary</h2>
@@ -675,26 +697,27 @@ def _render_deposit_form_page(db: Session, message: str = "", edit_flow: dict = 
     rows_html = ""
     for f in flows:
         rows_html += (
-            f"<tr><td>{f['flow_date']}</td><td>{f['account_type']}</td>"
-            f"<td>{f['amount']:+,.0f}</td><td>{f['memo'] or ''}</td>"
+            f"<tr><td>{_esc(f['flow_date'])}</td><td>{_esc(f['account_type'])}</td>"
+            f"<td>{f['amount']:+,.0f}</td><td>{_esc(f['memo'] or '')}</td>"
             f"<td>"
-            f"<a href=\"/report/deposit?edit_id={f['id']}\"><button type=\"button\">수정</button></a> "
+            f"<a href=\"/report/deposit?edit_id={int(f['id'])}\"><button type=\"button\">수정</button></a> "
             f"<form method=\"post\" action=\"/report/deposit/delete\" style=\"display:inline\" "
             f"onsubmit=\"return confirm('삭제하시겠습니까?')\">"
-            f"<input type=\"hidden\" name=\"flow_id\" value=\"{f['id']}\">"
+            f"<input type=\"hidden\" name=\"flow_id\" value=\"{int(f['id'])}\">"
             f"<button type=\"submit\">삭제</button></form></td></tr>"
         )
 
-    message_html = f'<p class="msg">{message}</p>' if message else ""
+    message_text = _DEPOSIT_MESSAGES.get(message, "")
+    message_html = f'<p class="msg">{_esc(message_text)}</p>' if message_text else ""
     account_select = _account_options_html(edit_flow["account_type"] if edit_flow else "")
     today = date.today().isoformat()
 
     form_title = "수정" if edit_flow else "입금/출금 추가"
     form_action = "/report/deposit/update" if edit_flow else "/report/deposit/add"
-    flow_date_value = edit_flow["flow_date"] if edit_flow else today
+    flow_date_value = _esc(edit_flow["flow_date"]) if edit_flow else today
     amount_value = f' value="{edit_flow["amount"]:g}"' if edit_flow else ""
-    memo_value = f' value="{edit_flow["memo"] or ""}"' if edit_flow else ""
-    flow_id_field = f'<input type="hidden" name="flow_id" value="{edit_flow["id"]}">' if edit_flow else ""
+    memo_value = f' value="{_esc(edit_flow["memo"] or "")}"' if edit_flow else ""
+    flow_id_field = f'<input type="hidden" name="flow_id" value="{int(edit_flow["id"])}">' if edit_flow else ""
     cancel_link = '<a href="/report/deposit"><button type="button">취소</button></a>' if edit_flow else ""
 
     return f"""
@@ -810,10 +833,12 @@ async def report_deposit_add(
 ):
     if not _has_valid_session(request):
         return RedirectResponse(url="/portfolio/login", status_code=status.HTTP_303_SEE_OTHER)
+    if account_type not in ACCOUNT_TYPES:
+        return RedirectResponse(url="/report/deposit?message=invalid", status_code=status.HTTP_303_SEE_OTHER)
     engine = PerformanceReportEngine(db)
     engine.record_cash_flow(flow_date, account_type, amount, memo)
     return RedirectResponse(
-        url=f"/report/deposit?message={quote('저장되었습니다')}",
+        url="/report/deposit?message=saved",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
@@ -830,10 +855,12 @@ async def report_deposit_update(
 ):
     if not _has_valid_session(request):
         return RedirectResponse(url="/portfolio/login", status_code=status.HTTP_303_SEE_OTHER)
+    if account_type not in ACCOUNT_TYPES:
+        return RedirectResponse(url="/report/deposit?message=invalid", status_code=status.HTTP_303_SEE_OTHER)
     engine = PerformanceReportEngine(db)
     engine.update_cash_flow(flow_id, flow_date, account_type, amount, memo)
     return RedirectResponse(
-        url=f"/report/deposit?message={quote('수정되었습니다')}",
+        url="/report/deposit?message=updated",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
@@ -849,7 +876,7 @@ async def report_deposit_delete(
     engine = PerformanceReportEngine(db)
     engine.delete_cash_flow(flow_id)
     return RedirectResponse(
-        url=f"/report/deposit?message={quote('삭제되었습니다')}",
+        url="/report/deposit?message=deleted",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
