@@ -215,5 +215,124 @@ class SchedulerFixedTest(unittest.TestCase):
             config.PENSION_STRATEGY = original
 
 
+class ViewTargetTest(unittest.TestCase):
+    def setUp(self):
+        import momentum_view_server
+        self.view = momentum_view_server
+
+    def test_pension_targets_come_from_portfolio_when_fixed(self):
+        original = config.PENSION_STRATEGY
+        config.PENSION_STRATEGY = "fixed"
+        try:
+            got = self.view.target_weights_for("연금저축", [])
+        finally:
+            config.PENSION_STRATEGY = original
+        self.assertEqual(got, {t: v["target_weight"] for t, v in config.PENSION_PORTFOLIO.items()})
+
+    def test_pension_targets_use_top2_when_momentum(self):
+        original = config.PENSION_STRATEGY
+        config.PENSION_STRATEGY = "momentum"
+        try:
+            got = self.view.target_weights_for(
+                "연금저축", [{"ticker": "X", "is_selected": True}, {"ticker": "Y", "is_selected": False}])
+        finally:
+            config.PENSION_STRATEGY = original
+        self.assertEqual(got, {"X": 50.0, "Y": 0.0})
+
+    def test_irp_targets_unchanged(self):
+        got = self.view.target_weights_for("IRP", [{"ticker": "X", "is_selected": True}])
+        self.assertEqual(got, {t: v.get("target_weight", 0) for t, v in config.IRP_PORTFOLIO.items()})
+
+
+class ManualEndpointTest(unittest.TestCase):
+    """httpx 없이 엔드포인트 코루틴을 직접 호출한다."""
+
+    @classmethod
+    def setUpClass(cls):
+        # main 임포트는 init_db()/스케줄러 시작을 하므로 임포트 동안만 막는다
+        with patch("database.init_db"), patch("scheduler.JobScheduler.start"):
+            import main
+        cls.main = main
+
+    def setUp(self):
+        self.db = make_db()
+        hold(self.db, "연금저축", "AAA", 10)
+        self.patches = [
+            patch("scheduler.SignalAccuracyEngine"),
+            patch("scheduler.WebhookNotifier"),
+            patch("scheduler.TelegramNotificationManager"),
+        ]
+        self.acc, self.wh, self.tg = [p.start() for p in self.patches]
+        self.acc.return_value.record_rebalance_signal.return_value = {
+            "signal_id": "x", "direction": "BUY", "confidence": 0.5}
+        self.orig = (config.PENSION_STRATEGY, config.PENSION_PORTFOLIO)
+        config.PENSION_STRATEGY = "fixed"
+        config.PENSION_PORTFOLIO = PORT
+
+    def tearDown(self):
+        config.PENSION_STRATEGY, config.PENSION_PORTFOLIO = self.orig
+        for p in self.patches:
+            p.stop()
+        self.db.close()
+
+    def call(self, **kw):
+        import asyncio
+        return asyncio.run(self.main.trigger_check_pension_rebalance(db=self.db, **kw))
+
+    def test_fixed_response_has_quantities_and_names(self):
+        res = self.call(notify=False)
+        self.assertEqual(res["strategy"], "fixed")
+        self.assertEqual(res["total_signals"], len(res["signals"]))
+        self.assertTrue(res["signals"])
+        for s in res["signals"]:
+            for key in ("name", "current_price", "rebalance_quantity"):
+                self.assertIn(key, s)
+        self.assertEqual({s["ticker"]: s["name"] for s in res["signals"]}["AAA"], "A")
+        self.assertEqual(res["saved_count"], len(res["signals"]))
+
+    def test_notify_false_sends_nothing(self):
+        self.call(notify=False)
+        self.tg.return_value.send_rebalance_alert.assert_not_called()
+        self.wh.return_value.send_webhook.assert_not_called()
+
+    def test_notify_true_sends_one_alert(self):
+        res = self.call(notify=True)
+        send = self.tg.return_value.send_rebalance_alert
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["label"], "연금저축")
+        # 저장은 한 번만
+        self.assertEqual(self.db.query(RebalanceSignal).count(), len(res["signals"]))
+
+    def test_momentum_ignores_notify(self):
+        config.PENSION_STRATEGY = "momentum"
+        with patch.object(RebalanceEngine, "calculate_pension_rebalance_signal", return_value=[]) as calc:
+            res = self.call(notify=True)
+        calc.assert_called_once()
+        self.assertEqual(res["strategy"], "momentum")
+        self.tg.return_value.send_rebalance_alert.assert_not_called()
+
+
+class PortfolioPerformanceTest(unittest.TestCase):
+    def test_is_selected_false_for_all_when_fixed(self):
+        from database import MomentumScore
+        from portfolio_engine import PortfolioEngine
+        db = make_db()
+        hold(db, "연금저축", "AAA", 10)
+        db.add(MomentumScore(ticker="AAA", calc_date=D, is_selected=True))
+        db.commit()
+        original = config.PENSION_STRATEGY
+        try:
+            config.PENSION_STRATEGY = "fixed"
+            fixed = PortfolioEngine(db).calculate_portfolio_performance("연금저축")
+            config.PENSION_STRATEGY = "momentum"
+            mom = PortfolioEngine(db).calculate_portfolio_performance("연금저축")
+        finally:
+            config.PENSION_STRATEGY = original
+            db.close()
+        self.assertTrue(fixed["holdings"])
+        self.assertFalse(any(h["is_selected"] for h in fixed["holdings"]))
+        self.assertTrue(all(h["is_selected"] for h in mom["holdings"]))
+
+
 if __name__ == "__main__":
     unittest.main()
