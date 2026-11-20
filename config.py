@@ -41,6 +41,9 @@ MOMENTUM_WEIGHTS = {
 MOMENTUM_POSITIVE_THRESHOLD = 0.0
 MA_PERIOD_MONTHS = 10
 MOMENTUM_TOP_N = 2
+# 모멘텀 점수를 분배금이 재투자된 수정주가(야후)로 계산한다. 조회·검증에 실패하면 그 달은
+# DB 종가로 계산하고 텔레그램으로 알린다. False면 항상 DB 종가(분배금 제외)로 계산한다.
+MOMENTUM_USE_ADJUSTED_PRICES = True
 
 # IRP 리밸런싱 파라미터 (확정)
 REBALANCE_BAND_PCT = 5.0

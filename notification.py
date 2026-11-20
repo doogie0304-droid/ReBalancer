@@ -155,7 +155,7 @@ class TelegramNotificationManager:
 
         return self.send_telegram_message(title, message, "price_alert")
 
-    def send_momentum_alert(self, all_scores: list, selected_tickers: list, calc_date) -> bool:
+    def send_momentum_alert(self, all_scores: list, selected_tickers: list, calc_date, price_basis: str = "raw") -> bool:
         """모멘텀 알림 (종목별 리스트 + 전체 상세 링크)
 
         모바일 텔레그램 코드블록은 고정폭 폰트가 아니고 화면 폭에서 줄바꿈되어
@@ -175,9 +175,13 @@ class TelegramNotificationManager:
 
         body = "\n\n".join(blocks)
 
+        # 가격은 실제 종가, 점수는 price_basis에 따라 분배금 포함(수정주가) 또는 제외(종가) 기준
+        basis_label = "분배금 포함(수정주가)" if price_basis == "adjusted" else "분배금 제외(종가)"
+
         message = (
             f"Date: {calc_date}\n\n{body}\n\n"
-            f"▶ = 선정된 TOP {len(selected_tickers)} 종목\n\n"
+            f"▶ = 선정된 TOP {len(selected_tickers)} 종목\n"
+            f"점수 기준: {basis_label}\n\n"
             f"전체 상세: {BASE_URL}/momentum/view"
         )
 

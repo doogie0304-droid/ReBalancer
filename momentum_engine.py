@@ -5,16 +5,48 @@ import logging
 from datetime import datetime, timedelta, date
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from config import MOMENTUM_WEIGHTS, MOMENTUM_POSITIVE_THRESHOLD, MA_PERIOD_MONTHS, MOMENTUM_TOP_N, PENSION_ETFS
+from config import (
+    MOMENTUM_WEIGHTS, MOMENTUM_POSITIVE_THRESHOLD, MA_PERIOD_MONTHS, MOMENTUM_TOP_N, PENSION_ETFS,
+    MOMENTUM_USE_ADJUSTED_PRICES,
+)
 from database import ETFPrice, MomentumScore
+from adjusted_prices import price_on_or_before, load_adjusted_prices
 
 logger = logging.getLogger(__name__)
+
+def create_momentum_engine(db: Session, calc_date: date, loader=load_adjusted_prices):
+    """설정에 따라 수정주가를 받아 모멘텀 엔진을 만든다.
+
+    Returns:
+        (engine, fallback_reason). 수정주가를 쓰도록 설정됐는데 조회·검증에 실패하면
+        engine은 DB 종가 기준이고 fallback_reason에 사유가 담긴다. 그 외에는 None.
+    """
+    if not MOMENTUM_USE_ADJUSTED_PRICES:
+        return MomentumEngine(db), None
+
+    # 현금처럼 시세가 없는 항목은 점수 대상이 아니므로 조회하지 않는다
+    tickers = [t for t, info in PENSION_ETFS.items() if info.get('type') != 'cash']
+    try:
+        adjusted, reason = loader(db, tickers, calc_date)
+    except Exception as e:
+        logger.error(f"[Adjusted Prices] Unexpected error: {type(e).__name__}: {e}", exc_info=True)
+        adjusted, reason = {}, f"수정주가 조회 중 오류 ({type(e).__name__})"
+    return MomentumEngine(db, adjusted_prices=adjusted), reason
+
 
 class MomentumEngine:
     """모멘텀 계산"""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, adjusted_prices: dict = None):
+        """adjusted_prices: 종목별 수정주가(adjusted_prices.load_adjusted_prices의 결과).
+
+        주어지면 점수(R3/R6/R12)와 MA10을 분배금이 재투자된 수정주가로 계산한다.
+        비어 있으면 기존처럼 DB의 실제 종가로 계산한다. 종목끼리 점수를 비교하므로
+        한 엔진 안에서는 전 종목이 같은 기준을 쓴다(현금처럼 시세가 없는 종목 제외).
+        """
         self.db = db
+        self.adjusted_prices = adjusted_prices or {}
+        self.price_basis = "adjusted" if self.adjusted_prices else "raw"
 
     def get_price_on_date(self, ticker: str, target_date: date) -> float:
         """특정 날짜의 종가 조회 (정확한 날짜 또는 가장 가까운 이전 거래일)"""
@@ -24,6 +56,13 @@ class MomentumEngine:
         ).order_by(ETFPrice.price_date.desc()).first()
 
         return price.close_price if price else None
+
+    def get_score_price(self, ticker: str, target_date: date) -> float:
+        """점수 계산용 가격. 수정주가가 있으면 그 값, 없으면 DB 종가."""
+        series = self.adjusted_prices.get(ticker)
+        if series is not None:
+            return price_on_or_before(series, target_date)
+        return self.get_price_on_date(ticker, target_date)
 
     def calculate_return(self, start_price: float, end_price: float) -> float:
         """수익률 계산: ((종가 - 시작가) / 시작가) * 100"""
@@ -36,7 +75,7 @@ class MomentumEngine:
         prices = []
         for i in range(period_months):
             snapshot_date = calc_date - timedelta(days=i * 30)
-            price = self.get_price_on_date(ticker, snapshot_date)
+            price = self.get_score_price(ticker, snapshot_date)
             if price is not None:
                 prices.append(price)
 
@@ -56,7 +95,8 @@ class MomentumEngine:
             'r12': 0.0,
             'weighted_score': 0.0,
             'ma10': 0.0,
-            'passed_condition': False
+            'passed_condition': False,
+            'price_basis': self.price_basis
         }
 
         try:
@@ -66,22 +106,27 @@ class MomentumEngine:
                 logger.warning(f"No price data for {ticker} on {calc_date}")
                 return result
 
+            # current_price는 화면·알림·매매 수량에 쓰는 실제 종가다. 점수는 score_price로 낸다.
             result['current_price'] = current_price
+            score_price = self.get_score_price(ticker, calc_date)
+            if score_price is None:
+                logger.warning(f"No score price for {ticker} on {calc_date}")
+                return result
 
             # 3개월(약 60일) 전 가격
             date_3m = calc_date - timedelta(days=60)
-            price_3m = self.get_price_on_date(ticker, date_3m)
-            result['r3'] = self.calculate_return(price_3m, current_price) if price_3m else 0.0
+            price_3m = self.get_score_price(ticker, date_3m)
+            result['r3'] = self.calculate_return(price_3m, score_price) if price_3m else 0.0
 
             # 6개월(약 120일) 전 가격
             date_6m = calc_date - timedelta(days=120)
-            price_6m = self.get_price_on_date(ticker, date_6m)
-            result['r6'] = self.calculate_return(price_6m, current_price) if price_6m else 0.0
+            price_6m = self.get_score_price(ticker, date_6m)
+            result['r6'] = self.calculate_return(price_6m, score_price) if price_6m else 0.0
 
             # 12개월(약 240일) 전 가격
             date_12m = calc_date - timedelta(days=240)
-            price_12m = self.get_price_on_date(ticker, date_12m)
-            result['r12'] = self.calculate_return(price_12m, current_price) if price_12m else 0.0
+            price_12m = self.get_score_price(ticker, date_12m)
+            result['r12'] = self.calculate_return(price_12m, score_price) if price_12m else 0.0
 
             # MA_PERIOD_MONTHS개월 이동평균 (절대모멘텀 필터용)
             result['ma10'] = self.get_moving_average(ticker, calc_date, period_months=MA_PERIOD_MONTHS)
@@ -98,7 +143,7 @@ class MomentumEngine:
             result['passed_condition'] = (
                 weighted_score > MOMENTUM_POSITIVE_THRESHOLD
                 and result['ma10'] > 0
-                and current_price > result['ma10']
+                and score_price > result['ma10']
             )
 
             logger.debug(f"{ticker}: r3={result['r3']:.2f}%, r6={result['r6']:.2f}%, r12={result['r12']:.2f}%, weighted={weighted_score:.2f}%")

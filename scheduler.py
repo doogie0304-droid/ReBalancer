@@ -16,7 +16,7 @@ from config import (
 )
 from database import get_db, ETFPrice, MomentumScore
 from crawler import NaverETFCrawler
-from momentum_engine import MomentumEngine
+from momentum_engine import MomentumEngine, create_momentum_engine
 from rebalance_engine import RebalanceEngine
 from notification import TelegramNotificationManager
 from webhook_notifier import WebhookNotifier
@@ -338,6 +338,27 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"[Stale Prices] Alert failed: {type(e).__name__}: {e}", exc_info=True)
 
+    def _alert_adjusted_price_fallback(self, db, calc_date: date, reason: str):
+        """수정주가를 못 써서 DB 종가로 점수를 낸 사실을 알린다. 알림 실패가 계산을 막지 않게 예외는 삼킨다."""
+        logger.error(f"[Adjusted Prices] Fallback to raw closes on {calc_date}: {reason}")
+        try:
+            message = (
+                f"{calc_date.isoformat()} 모멘텀 점수를 분배금이 빠진 종가로 계산했습니다.\n\n"
+                f"사유: {reason}\n\n"
+                "수정주가(분배금 포함)를 받지 못했거나 DB 종가와 맞지 않았습니다.\n"
+                "이번 달 점수는 분배금을 많이 주는 종목에 불리하게 나옵니다."
+            )
+            notifier = TelegramNotificationManager(db)
+            notifier.send_telegram_message(
+                "모멘텀 점수 기준 알림", message, notification_type="momentum_adjusted_price_fallback"
+            )
+            WebhookNotifier(db).send_webhook("momentum_adjusted_price_fallback", {
+                "date": calc_date.isoformat(),
+                "reason": reason,
+            })
+        except Exception as e:
+            logger.error(f"[Adjusted Prices] Alert failed: {type(e).__name__}: {e}", exc_info=True)
+
     def _job_snapshot_portfolio(self, db):
         """계좌별 포트폴리오 스냅샷 저장 (매일 종가 수집 직후 호출, 별도 스케줄 등록 안 함)"""
         try:
@@ -483,9 +504,11 @@ class JobScheduler:
                 )
                 return
 
-            # 모멘텀 엔진 생성
-            momentum_engine = MomentumEngine(db)
+            # 모멘텀 엔진 생성 (점수는 분배금이 반영된 수정주가로, 실패하면 DB 종가로)
             calc_date = date.today()
+            momentum_engine, fallback_reason = create_momentum_engine(db, calc_date)
+            if fallback_reason:
+                self._alert_adjusted_price_fallback(db, calc_date, fallback_reason)
 
             # TOP N 종목 선정 (조건 통과 + 상위 2개)
             top_n_scores = momentum_engine.select_top_n_passed(calc_date, n=2)
@@ -520,11 +543,15 @@ class JobScheduler:
             if all_scores:
                 notifier = TelegramNotificationManager(db)
                 selected_tickers = [score['ticker'] for score in top_n_scores]
-                notifier.send_momentum_alert(all_scores, selected_tickers, calc_date.isoformat())
+                notifier.send_momentum_alert(
+                    all_scores, selected_tickers, calc_date.isoformat(),
+                    price_basis=momentum_engine.price_basis,
+                )
 
                 webhook = WebhookNotifier(db)
                 webhook.send_webhook("momentum_update", {
                     "calc_date": calc_date.isoformat(),
+                    "price_basis": momentum_engine.price_basis,
                     "selected_tickers": selected_tickers,
                     "scores": [
                         {

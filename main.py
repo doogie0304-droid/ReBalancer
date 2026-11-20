@@ -12,7 +12,7 @@ from config import API_TITLE, API_DESCRIPTION, API_VERSION, LOG_LEVEL, PENSION_E
 from database import init_db, get_db, ETFPrice, MomentumScore, RebalanceSignal, UserPortfolio
 from scheduler import get_scheduler
 from crawler import NaverETFCrawler
-from momentum_engine import MomentumEngine
+from momentum_engine import MomentumEngine, create_momentum_engine
 from rebalance_engine import RebalanceEngine
 from portfolio_engine import PortfolioEngine
 from signal_accuracy_engine import SignalAccuracyEngine
@@ -458,9 +458,9 @@ async def trigger_calculate_momentum(db: Session = Depends(get_db)) -> Dict:
     try:
         logger.info("⚡ 수동 모멘텀 계산 시작")
 
-        # MomentumEngine 생성
-        momentum_engine = MomentumEngine(db)
+        # MomentumEngine 생성 (월간 자동 계산과 같은 기준: 수정주가, 실패하면 DB 종가)
         calc_date = date.today()
+        momentum_engine, fallback_reason = create_momentum_engine(db, calc_date)
 
         # TOP N 선정
         top_n_scores = momentum_engine.select_top_n_passed(calc_date, n=2)
@@ -482,7 +482,9 @@ async def trigger_calculate_momentum(db: Session = Depends(get_db)) -> Dict:
             "calculated_count": len(all_scores),
             "saved_count": saved_count,
             "top_selected": len(top_n_scores),
-            "calculation_date": calc_date.isoformat()
+            "calculation_date": calc_date.isoformat(),
+            "price_basis": momentum_engine.price_basis,
+            "adjusted_price_fallback_reason": fallback_reason
         }
     except Exception as e:
         logger.error(f"수동 모멘텀 계산 오류: {e}")
