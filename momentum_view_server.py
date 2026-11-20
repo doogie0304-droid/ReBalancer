@@ -72,6 +72,17 @@ _DEPOSIT_MESSAGES = {
 _PORTFOLIO_ACCOUNTS = ("연금저축", "IRP")
 
 
+def target_weights_for(account_type: str, holdings: list) -> dict:
+    """계좌별 목표 비중(%) 맵. 연금저축은 전략(PENSION_STRATEGY)을 호출 시점에 읽는다."""
+    import config
+    if account_type == "IRP":
+        return {t: v.get("target_weight", 0) for t, v in config.IRP_PORTFOLIO.items()}
+    if config.PENSION_STRATEGY == "fixed":
+        return {t: v["target_weight"] for t, v in config.PENSION_PORTFOLIO.items()}
+    # momentum: Top2 기반 50%씩
+    return {h["ticker"]: 50.0 if h.get("is_selected") else 0.0 for h in holdings}
+
+
 def _login_page_html(error: str = "") -> str:
     error_text = _LOGIN_ERRORS.get(error, "")
     error_html = f'<p class="error">{_esc(error_text)}</p>' if error_text else ""
@@ -207,15 +218,7 @@ def _render_portfolio_edit_page(
         total_value = sum(h["current_value"] for h in holdings)
 
         # 목표비중 설정
-        target_weights = {}
-        if account_type == "IRP":
-            from config import IRP_PORTFOLIO
-            for ticker, info in IRP_PORTFOLIO.items():
-                target_weights[ticker] = info.get("target_weight", 0)
-        else:  # 연금저축
-            # Top2 기반 50% 각
-            for h in holdings:
-                target_weights[h["ticker"]] = 50.0 if h.get("is_selected") else 0.0
+        target_weights = target_weights_for(account_type, holdings)
 
         total_cost = sum(h["cost_value"] for h in holdings)
         total_return = total_value - total_cost

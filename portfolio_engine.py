@@ -110,8 +110,9 @@ class PortfolioEngine:
             }
 
         # 연금저축용 Top2 선택 정보 조회
+        import config
         selected_tickers = set()
-        if account_type == "연금저축" or not account_type:
+        if config.PENSION_STRATEGY == "momentum" and (account_type == "연금저축" or not account_type):
             from database import MomentumScore
             latest = self.db.query(MomentumScore).order_by(MomentumScore.calc_date.desc()).first()
             if latest:

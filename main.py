@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from config import API_TITLE, API_DESCRIPTION, API_VERSION, LOG_LEVEL, PENSION_ETFS, IRP_PORTFOLIO
 from database import init_db, get_db, ETFPrice, MomentumScore, RebalanceSignal, UserPortfolio
-from scheduler import get_scheduler
+from scheduler import get_scheduler, _find_stale_prices, _previous_business_day
 from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine, create_momentum_engine
 from rebalance_engine import RebalanceEngine
@@ -537,43 +537,87 @@ async def trigger_check_rebalance(db: Session = Depends(get_db)) -> Dict:
         raise HTTPException(status_code=500, detail=f"리밸런싱 체크 실패: {str(e)}")
 
 @app.post("/api/v1/jobs/check-pension-rebalance")
-async def trigger_check_pension_rebalance(db: Session = Depends(get_db)) -> Dict:
-    """즉시 연저펀 Top2 밴드형(+/-5%p) 재조정 체크 실행"""
+async def trigger_check_pension_rebalance(notify: bool = False, db: Session = Depends(get_db)) -> Dict:
+    """즉시 연금저축 리밸런싱 체크 실행 (전략: config.PENSION_STRATEGY)
+
+    - "fixed": 고정 목표비중 밴드형 신호. notify=true면 저장과 함께 텔레그램·웹훅까지 발송.
+    - "momentum": 기존 Top2 밴드형 신호. notify는 효과 없음(저장만).
+    """
+    import config
     try:
-        logger.info("⚡ 수동 연저펀 밴드 재조정 체크 시작")
+        strategy = config.PENSION_STRATEGY
+        logger.info(f"⚡ 수동 연금저축 재조정 체크 시작 (strategy={strategy}, notify={notify})")
 
         rebalance_engine = RebalanceEngine(db)
         signal_date = date.today()
 
-        signals = rebalance_engine.calculate_pension_rebalance_signal(signal_date)
-        saved_count = rebalance_engine.save_rebalance_signals(signals)
+        if strategy == "fixed":
+            # 묵은 시세 가드: 실제 매매 수량이 나오는 경로이므로 직전 영업일 종가가 없으면 거부
+            guard_tickers = list(config.PENSION_PORTFOLIO) + [
+                h.ticker for h in db.query(UserPortfolio).filter(
+                    UserPortfolio.account_type == "연금저축",
+                    UserPortfolio.is_active == True
+                ).all() if h.ticker not in config.PENSION_PORTFOLIO
+            ]
+            stale = _find_stale_prices(db, guard_tickers, _previous_business_day(date.today()))
+            if stale:
+                lines = ", ".join(
+                    f"{ticker}(마지막 시세 {latest.isoformat() if latest else '없음'})"
+                    for ticker, latest in stale
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"직전 영업일 종가가 없는 종목이 있어 계산하지 않았습니다: {lines}")
+            if notify:
+                signals = get_scheduler()._run_fixed_rebalance(
+                    db, "연금저축", config.PENSION_PORTFOLIO, signal_date)
+                saved_count = len(signals)  # _run_fixed_rebalance가 이미 저장함
+            else:
+                signals = rebalance_engine.calculate_fixed_rebalance_signal(
+                    signal_date, "연금저축", config.PENSION_PORTFOLIO)
+                saved_count = rebalance_engine.save_rebalance_signals(signals)
+        else:
+            signals = rebalance_engine.calculate_pension_rebalance_signal(signal_date)
+            saved_count = rebalance_engine.save_rebalance_signals(signals)
         needs_rebalance_count = sum(1 for s in signals if s['needs_rebalance'])
+
+        def _name(ticker: str) -> str:
+            for table in (config.PENSION_PORTFOLIO, IRP_PORTFOLIO, PENSION_ETFS):
+                if ticker in table:
+                    return table[ticker].get("name", ticker)
+            return ticker
 
         signal_details = [
             {
                 "ticker": s['ticker'],
+                "name": _name(s['ticker']),
                 "action": s['action'],
+                "current_price": s.get('current_price'),
                 "current_weight": round(s['current_weight'], 2),
                 "target_weight": round(s['target_weight'], 2),
                 "weight_diff": round(s['weight_diff'], 2),
                 "needs_rebalance": s['needs_rebalance'],
-                "rebalance_amount": round(s['rebalance_amount'], 0)
+                "rebalance_amount": round(s['rebalance_amount'], 0),
+                "rebalance_quantity": s.get('rebalance_quantity')
             }
             for s in signals
         ]
 
         return {
             "status": "ok",
-            "message": "연저펀 밴드 재조정 체크 완료",
+            "message": "연금저축 재조정 체크 완료",
+            "strategy": strategy,
             "signal_date": signal_date.isoformat(),
             "total_signals": len(signals),
             "needs_rebalance_count": needs_rebalance_count,
             "saved_count": saved_count,
             "signals": signal_details
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"수동 연저펀 밴드 재조정 체크 오류: {e}")
-        raise HTTPException(status_code=500, detail=f"연저펀 밴드 재조정 체크 실패: {str(e)}")
+        logger.error(f"수동 연금저축 재조정 체크 오류: {e}")
+        raise HTTPException(status_code=500, detail=f"연금저축 재조정 체크 실패: {str(e)}")
 
 # ==================== Signal Accuracy ====================
 

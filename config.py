@@ -84,7 +84,9 @@ HOLIDAY_API_KEY = os.getenv("HOLIDAY_API_KEY", "")
 # 키 갱신 시 이 날짜도 함께 업데이트
 HOLIDAY_API_KEY_EXPIRES = "2028-07-08"
 
-# 관리 종목 (연금저축펀드 - 듀얼 모멘텀 전략)
+# 모멘텀 유니버스 (PENSION_STRATEGY == "momentum"일 때만 신호 계산에 쓴다)
+# 모멘텀을 다시 켜도 이력이 끊기지 않도록 시세 수집은 계속한다.
+# 현재 연금저축 전략은 PENSION_STRATEGY를 따른다.
 PENSION_ETFS = {
     "379800": {"name": "KODEX 미국S&P500", "type": "foreign_stock"},
     "379810": {"name": "KODEX 미국나스닥100", "type": "foreign_stock"},
@@ -105,6 +107,20 @@ IRP_PORTFOLIO = {
     "214980": {"name": "KODEX 단기채권PLUS", "target_weight": 15.0},
     "CASH": {"name": "현금", "target_weight": 0.0},
 }
+
+# 연금 전략: "fixed"면 연금저축도 IRP와 같은 고정 목표표를 쓴다 ("momentum"이면 연금저축은 Top2 모멘텀)
+PENSION_STRATEGY = "fixed"
+# 목표표는 하나만 둔다 (IRP_PORTFOLIO와 같은 객체)
+PENSION_PORTFOLIO = IRP_PORTFOLIO
+
+
+def fixed_allocation_accounts() -> dict:
+    """고정 배분을 적용할 계좌 -> 목표표. 호출 시점의 PENSION_STRATEGY를 읽는다."""
+    accounts = {}
+    if PENSION_STRATEGY == "fixed":
+        accounts["연금저축"] = PENSION_PORTFOLIO
+    accounts["IRP"] = IRP_PORTFOLIO
+    return accounts
 
 # 로깅 설정
 TIMEZONE = "Asia/Seoul"
