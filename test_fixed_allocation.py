@@ -185,9 +185,24 @@ class SchedulerFixedTest(unittest.TestCase):
         self.assertEqual(calls, ["연금저축", "IRP"])
 
     def test_momentum_job_is_skipped_when_fixed(self):
-        with patch("scheduler.get_db") as get_db:
-            self.job._job_calculate_momentum()
+        original = config.PENSION_STRATEGY
+        config.PENSION_STRATEGY = "fixed"
+        try:
+            with patch("scheduler.get_db") as get_db:
+                self.job._job_calculate_momentum()
+        finally:
+            config.PENSION_STRATEGY = original
         get_db.assert_not_called()
+
+    def test_momentum_job_runs_when_momentum(self):
+        original = config.PENSION_STRATEGY
+        config.PENSION_STRATEGY = "momentum"
+        try:
+            with patch("scheduler._is_business_day", return_value=True),                  patch("scheduler._first_business_day_of_month", return_value=date(2000, 1, 3)),                  patch("scheduler.get_db", side_effect=RuntimeError("sentinel")) as get_db:
+                self.job._job_calculate_momentum()  # 센티널 예외는 잡 자체 try/except가 처리
+        finally:
+            config.PENSION_STRATEGY = original
+        get_db.assert_called_once()
 
     def test_pension_price_map_follows_strategy(self):
         original = config.PENSION_STRATEGY
