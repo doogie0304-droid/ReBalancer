@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from config import API_TITLE, API_DESCRIPTION, API_VERSION, LOG_LEVEL, PENSION_ETFS, IRP_PORTFOLIO
 from database import init_db, get_db, ETFPrice, MomentumScore, RebalanceSignal, UserPortfolio
-from scheduler import get_scheduler
+from scheduler import get_scheduler, _find_stale_prices, _previous_business_day
 from crawler import NaverETFCrawler
 from momentum_engine import MomentumEngine, create_momentum_engine
 from rebalance_engine import RebalanceEngine
@@ -552,6 +552,22 @@ async def trigger_check_pension_rebalance(notify: bool = False, db: Session = De
         signal_date = date.today()
 
         if strategy == "fixed":
+            # 묵은 시세 가드: 실제 매매 수량이 나오는 경로이므로 직전 영업일 종가가 없으면 거부
+            guard_tickers = list(config.PENSION_PORTFOLIO) + [
+                h.ticker for h in db.query(UserPortfolio).filter(
+                    UserPortfolio.account_type == "연금저축",
+                    UserPortfolio.is_active == True
+                ).all() if h.ticker not in config.PENSION_PORTFOLIO
+            ]
+            stale = _find_stale_prices(db, guard_tickers, _previous_business_day(date.today()))
+            if stale:
+                lines = ", ".join(
+                    f"{ticker}(마지막 시세 {latest.isoformat() if latest else '없음'})"
+                    for ticker, latest in stale
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"직전 영업일 종가가 없는 종목이 있어 계산하지 않았습니다: {lines}")
             if notify:
                 signals = get_scheduler()._run_fixed_rebalance(
                     db, "연금저축", config.PENSION_PORTFOLIO, signal_date)
@@ -597,6 +613,8 @@ async def trigger_check_pension_rebalance(notify: bool = False, db: Session = De
             "saved_count": saved_count,
             "signals": signal_details
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"수동 연금저축 재조정 체크 오류: {e}")
         raise HTTPException(status_code=500, detail=f"연금저축 재조정 체크 실패: {str(e)}")

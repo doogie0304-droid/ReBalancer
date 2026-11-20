@@ -646,6 +646,10 @@ class JobScheduler:
                     f"[Rebalance Check] {account_type} failed: {type(e).__name__}: {e}",
                     exc_info=True,
                 )
+                try:
+                    db.rollback()  # 실패한 계좌의 미완료 트랜잭션이 다음 계좌로 번지지 않게
+                except Exception as rollback_error:
+                    logger.error(f"[Rebalance Check] rollback failed: {rollback_error}")
 
     def _run_fixed_rebalance(self, db, account_type, portfolio, signal_date):
         """한 계좌의 고정 배분 신호 계산·저장·정확도 기록·알림 발송"""
@@ -674,6 +678,8 @@ class JobScheduler:
 
         accuracy_engine = SignalAccuracyEngine(db)
         for signal in signals:
+            if signal['ticker'] == "CASH":
+                continue  # 현금은 매매 신호 정확도 추적 대상이 아니다
             signal_result = accuracy_engine.record_rebalance_signal(
                 ticker=signal['ticker'],
                 action=signal['action'],

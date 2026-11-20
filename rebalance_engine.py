@@ -2,6 +2,7 @@
 """ReBalancer - 리밸런싱 엔진 (고정 배분 계좌: IRP, 연금저축)"""
 
 import logging
+import math
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -9,6 +10,8 @@ from config import REBALANCE_BAND_PCT, IRP_PORTFOLIO, PENSION_REBALANCE_BAND_PCT
 from database import ETFPrice, MomentumScore, RebalanceSignal, UserPortfolio
 
 logger = logging.getLogger(__name__)
+
+CASH_TICKER = "CASH"  # UserPortfolio에서 현금은 이 티커, quantity = 원화 금액
 
 class RebalanceEngine:
     """리밸런싱 계산"""
@@ -41,6 +44,8 @@ class RebalanceEngine:
         - weight_diff > band_pct: SELL / weight_diff < -band_pct: BUY / 그 외: HOLD
         - 보유 합계가 0이면 전부 HOLD (0으로 나누지 않는다)
         - 시세가 없는 종목은 평가액 0, 수량 0
+        - "CASH"는 1원으로 평가해 총자산에 넣고, 그 줄은 항상 HOLD (매매 대상 아님)
+        - 수량은 정수: 매수는 내림, 매도는 올림(보유 수량 한도). 1주 미만 매수는 HOLD로 낮춘다.
         """
         holdings = {
             h.ticker: h for h in self.db.query(UserPortfolio).filter(
@@ -54,12 +59,15 @@ class RebalanceEngine:
         distribution = {}
         total_value = 0.0
         for ticker in tickers:
-            price_info = self.get_latest_price(ticker)
-            price = price_info['price'] if price_info else 0.0
+            if ticker == CASH_TICKER:
+                price = 1.0  # 현금은 수량이 곧 원화 금액 (ETFPrice 행 없음)
+            else:
+                price_info = self.get_latest_price(ticker)
+                price = price_info['price'] if price_info else 0.0
             holding = holdings.get(ticker)
             quantity = holding.quantity if holding else 0.0
             amount = quantity * price
-            distribution[ticker] = {'price': price, 'amount': amount}
+            distribution[ticker] = {'price': price, 'amount': amount, 'quantity': quantity}
             total_value += amount
 
         self.total_assets = total_value
@@ -72,7 +80,7 @@ class RebalanceEngine:
             weight_diff = current_weight - target_weight
             target_amount = total_value * target_weight / 100
 
-            if total_value <= 0:
+            if total_value <= 0 or ticker == CASH_TICKER:
                 action, needs_rebalance, rebalance_amount = "HOLD", False, 0.0
             elif weight_diff > band_pct:
                 action, needs_rebalance = "SELL", True
@@ -83,7 +91,17 @@ class RebalanceEngine:
             else:
                 action, needs_rebalance, rebalance_amount = "HOLD", False, 0.0
 
-            rebalance_quantity = abs(rebalance_amount / data['price']) if data['price'] > 0 else 0
+            rebalance_quantity = 0.0
+            if action != "HOLD" and data['price'] > 0:
+                if action == "BUY":
+                    rebalance_quantity = float(math.floor(rebalance_amount / data['price']))
+                elif target_weight <= 0:
+                    rebalance_quantity = data['quantity']  # 목표 0%: 전량 매도
+                else:
+                    rebalance_quantity = float(min(
+                        math.ceil(rebalance_amount / data['price']), data['quantity']))
+            if action == "BUY" and rebalance_quantity <= 0:
+                action, needs_rebalance = "HOLD", False  # 1주도 못 사는 금액이면 신호를 내지 않는다
 
             signals.append({
                 'ticker': ticker,
