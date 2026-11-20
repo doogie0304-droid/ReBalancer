@@ -135,7 +135,7 @@ def sync_with_shell(ssh):
         logger.info(f"Syncing: {filename}... ", end="")
 
         # dd를 사용한 파일 복사
-        read_cmd = f"cat < '{unix_local_path}' | ssh -o StrictHostKeyChecking=no doogie_admin@192.168.0.46 'cat > /volume1/rebalancer/{filename}'"
+        read_cmd = f"cat < '{unix_local_path}' | ssh doogie_admin@192.168.0.46 'cat > /volume1/rebalancer/{filename}'"
 
         try:
             # Shell 실행

@@ -29,7 +29,7 @@ Write-Host ""
 # SSH 키 테스트
 Write-Host "Testing SSH connection..." -ForegroundColor Yellow
 try {
-    $result = ssh -i $keyPath -o StrictHostKeyChecking=no $nasHost "whoami" 2>&1
+    $result = ssh -i $keyPath $nasHost "whoami" 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "✅ SSH connection successful: $result" -ForegroundColor Green
     } else {
@@ -55,7 +55,7 @@ foreach ($file in $pythonFiles) {
 
     try {
         # SCP를 사용한 파일 전송
-        scp -i $keyPath -o StrictHostKeyChecking=no $localPath "${nasHost}:${nasDir}/${file}" 2>&1 | Out-Null
+        scp -i $keyPath $localPath "${nasHost}:${nasDir}/${file}" 2>&1 | Out-Null
 
         if ($LASTEXITCODE -eq 0) {
             Write-Host "✅" -ForegroundColor Green
@@ -78,7 +78,7 @@ Write-Host "Verifying files on NAS..." -ForegroundColor Yellow
 
 # NAS에서 Python 파일 확인
 $verifyCmd = "ls -la $nasDir/*.py | wc -l"
-$count = ssh -i $keyPath -o StrictHostKeyChecking=no $nasHost $verifyCmd 2>&1
+$count = ssh -i $keyPath $nasHost $verifyCmd 2>&1
 
 Write-Host "Python files on NAS: $count files" -ForegroundColor Green
 
@@ -86,13 +86,13 @@ Write-Host ""
 Write-Host "Restarting API server on NAS..." -ForegroundColor Yellow
 
 # 서비스 재시작
-ssh -i $keyPath -o StrictHostKeyChecking=no $nasHost "sudo systemctl restart rebalancer" 2>&1 | Out-Null
+ssh -i $keyPath $nasHost "sudo systemctl restart rebalancer" 2>&1 | Out-Null
 
 Start-Sleep -Seconds 2
 
 # 서비스 상태 확인
 Write-Host "Checking service status..." -ForegroundColor Yellow
-$status = ssh -i $keyPath -o StrictHostKeyChecking=no $nasHost "sudo systemctl status rebalancer | head -3" 2>&1
+$status = ssh -i $keyPath $nasHost "sudo systemctl status rebalancer | head -3" 2>&1
 
 foreach ($line in $status) {
     if ($line -match "active|running|failed") {
@@ -106,7 +106,7 @@ Write-Host ""
 Write-Host "Performing health check..." -ForegroundColor Yellow
 
 # Health check
-$health = ssh -i $keyPath -o StrictHostKeyChecking=no $nasHost "curl -s http://localhost:8000/health" 2>&1
+$health = ssh -i $keyPath $nasHost "curl -s http://localhost:8000/health" 2>&1
 
 if ($health -match '"status".*"healthy"') {
     Write-Host "✅ API server is healthy" -ForegroundColor Green
