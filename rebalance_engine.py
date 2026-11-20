@@ -33,96 +33,80 @@ class RebalanceEngine:
             'date': price_record.price_date
         }
 
-    def calculate_current_weights(self):
-        """실제 보유 수량(UserPortfolio) 기반 현재 자산 배분 계산"""
+    def calculate_fixed_rebalance_signal(self, signal_date, account_type: str, portfolio: dict,
+                                         band_pct: float = REBALANCE_BAND_PCT):
+        """계좌별 고정 목표비중 리밸런싱 신호 계산
+
+        - 대상: 목표표 순서대로, 그 뒤에 목표표 밖 보유 종목(목표 0%, 티커 정렬)
+        - weight_diff > band_pct: SELL / weight_diff < -band_pct: BUY / 그 외: HOLD
+        - 보유 합계가 0이면 전부 HOLD (0으로 나누지 않는다)
+        - 시세가 없는 종목은 평가액 0, 수량 0
+        """
         holdings = {
             h.ticker: h for h in self.db.query(UserPortfolio).filter(
-                UserPortfolio.account_type == "IRP",
+                UserPortfolio.account_type == account_type,
                 UserPortfolio.is_active == True
             ).all()
         }
 
-        current_distribution = {}
-        total_value = 0.0
+        tickers = list(portfolio.keys()) + sorted(t for t in holdings if t not in portfolio)
 
-        for ticker in IRP_PORTFOLIO.keys():
+        distribution = {}
+        total_value = 0.0
+        for ticker in tickers:
             price_info = self.get_latest_price(ticker)
             price = price_info['price'] if price_info else 0.0
             holding = holdings.get(ticker)
             quantity = holding.quantity if holding else 0.0
             amount = quantity * price
-
-            current_distribution[ticker] = {
-                'price': price,
-                'quantity': quantity,
-                'amount': amount,
-            }
+            distribution[ticker] = {'price': price, 'amount': amount}
             total_value += amount
 
         self.total_assets = total_value
-        for data in current_distribution.values():
-            data['weight'] = (data['amount'] / total_value * 100) if total_value > 0 else 0.0
 
-        return current_distribution
-
-    def calculate_rebalance_signal(self, signal_date):
-        """리밸런싱 신호 계산
-
-        신호 판정:
-        - weight_diff > BAND_PCT: SELL (과매수)
-        - weight_diff < -BAND_PCT: BUY (과매도)
-        - 그 외: HOLD
-        """
         signals = []
-        current_weights = self.calculate_current_weights()
-
-        for ticker, target_info in IRP_PORTFOLIO.items():
-            target_weight = target_info['target_weight']
-
-            if ticker not in current_weights:
-                logger.warning(f"Missing current weight for {ticker}")
-                continue
-
-            current_data = current_weights[ticker]
-            current_weight = current_data['weight']
+        for ticker in tickers:
+            data = distribution[ticker]
+            target_weight = portfolio[ticker]['target_weight'] if ticker in portfolio else 0.0
+            current_weight = (data['amount'] / total_value * 100) if total_value > 0 else 0.0
             weight_diff = current_weight - target_weight
+            target_amount = total_value * target_weight / 100
 
-            # 신호 판정
-            if weight_diff > REBALANCE_BAND_PCT:
-                action = "SELL"
-                needs_rebalance = True
-                rebalance_amount = current_data['amount'] - (self.total_assets * target_weight / 100)
-            elif weight_diff < -REBALANCE_BAND_PCT:
-                action = "BUY"
-                needs_rebalance = True
-                rebalance_amount = (self.total_assets * target_weight / 100) - current_data['amount']
+            if total_value <= 0:
+                action, needs_rebalance, rebalance_amount = "HOLD", False, 0.0
+            elif weight_diff > band_pct:
+                action, needs_rebalance = "SELL", True
+                rebalance_amount = data['amount'] - target_amount
+            elif weight_diff < -band_pct:
+                action, needs_rebalance = "BUY", True
+                rebalance_amount = target_amount - data['amount']
             else:
-                action = "HOLD"
-                needs_rebalance = False
-                rebalance_amount = 0.0
+                action, needs_rebalance, rebalance_amount = "HOLD", False, 0.0
 
-            # 수량 계산
-            rebalance_quantity = abs(rebalance_amount / current_data['price']) if current_data['price'] > 0 else 0
+            rebalance_quantity = abs(rebalance_amount / data['price']) if data['price'] > 0 else 0
 
-            signal = {
+            signals.append({
                 'ticker': ticker,
-                'account_type': 'IRP',
+                'account_type': account_type,
                 'signal_date': signal_date,
                 'target_weight': target_weight,
                 'current_weight': current_weight,
                 'weight_diff': weight_diff,
-                'current_price': current_data['price'],
-                'total_assets': self.total_assets,
-                'target_amount': self.total_assets * target_weight / 100,
-                'current_amount': current_data['amount'],
+                'current_price': data['price'],
+                'total_assets': total_value,
+                'target_amount': target_amount,
+                'current_amount': data['amount'],
                 'rebalance_amount': rebalance_amount,
                 'rebalance_quantity': rebalance_quantity,
                 'action': action,
-                'needs_rebalance': needs_rebalance
-            }
-            signals.append(signal)
+                'needs_rebalance': needs_rebalance,
+            })
 
         return signals
+
+    def calculate_rebalance_signal(self, signal_date):
+        """IRP 고정 비중 리밸런싱 신호 (계좌 일반형 계산의 IRP 래퍼)"""
+        return self.calculate_fixed_rebalance_signal(signal_date, "IRP", IRP_PORTFOLIO)
 
     def calculate_pension_rebalance_signal(self, signal_date, band_pct: float = PENSION_REBALANCE_BAND_PCT):
         """연저펀 Top2 밴드형 재조정 신호 계산

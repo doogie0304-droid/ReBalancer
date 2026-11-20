@@ -106,6 +106,20 @@ IRP_PORTFOLIO = {
     "CASH": {"name": "현금", "target_weight": 0.0},
 }
 
+# 연금 전략: "fixed"면 연금저축도 IRP와 같은 고정 목표표를 쓴다 ("momentum"이면 연금저축은 Top2 모멘텀)
+PENSION_STRATEGY = "fixed"
+# 목표표는 하나만 둔다 (IRP_PORTFOLIO와 같은 객체)
+PENSION_PORTFOLIO = IRP_PORTFOLIO
+
+
+def fixed_allocation_accounts() -> dict:
+    """고정 배분을 적용할 계좌 -> 목표표. 호출 시점의 PENSION_STRATEGY를 읽는다."""
+    accounts = {}
+    if PENSION_STRATEGY == "fixed":
+        accounts["연금저축"] = PENSION_PORTFOLIO
+    accounts["IRP"] = IRP_PORTFOLIO
+    return accounts
+
 # 로깅 설정
 TIMEZONE = "Asia/Seoul"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
