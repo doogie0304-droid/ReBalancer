@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ReBalancer - IRP 리밸런싱 엔진"""
+"""ReBalancer - 리밸런싱 엔진 (고정 배분 계좌: IRP, 연금저축)"""
 
 import logging
 from datetime import datetime, timedelta
@@ -15,7 +15,7 @@ class RebalanceEngine:
 
     def __init__(self, db: Session):
         self.db = db
-        self.total_assets = 0.0  # calculate_current_weights()가 실제 보유액으로 채움
+        self.total_assets = 0.0  # calculate_fixed_rebalance_signal()이 실제 보유액으로 채움
 
     def get_latest_price(self, ticker: str):
         """최신 종가 조회"""

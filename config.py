@@ -84,7 +84,9 @@ HOLIDAY_API_KEY = os.getenv("HOLIDAY_API_KEY", "")
 # 키 갱신 시 이 날짜도 함께 업데이트
 HOLIDAY_API_KEY_EXPIRES = "2028-07-08"
 
-# 관리 종목 (연금저축펀드 - 듀얼 모멘텀 전략)
+# 모멘텀 유니버스 (PENSION_STRATEGY == "momentum"일 때만 신호 계산에 쓴다)
+# 모멘텀을 다시 켜도 이력이 끊기지 않도록 시세 수집은 계속한다.
+# 현재 연금저축 전략은 PENSION_STRATEGY를 따른다.
 PENSION_ETFS = {
     "379800": {"name": "KODEX 미국S&P500", "type": "foreign_stock"},
     "379810": {"name": "KODEX 미국나스닥100", "type": "foreign_stock"},
