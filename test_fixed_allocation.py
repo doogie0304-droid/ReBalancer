@@ -6,13 +6,15 @@
 
 import unittest
 from datetime import date
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import config
-from database import Base, ETFPrice, UserPortfolio
+from database import Base, ETFPrice, RebalanceSignal, UserPortfolio
 from rebalance_engine import RebalanceEngine
+import scheduler
 
 D = date(2026, 11, 20)
 PORT = {"AAA": {"name": "A", "target_weight": 50.0},
@@ -135,6 +137,65 @@ class StrategySwitchTest(unittest.TestCase):
         config.PENSION_STRATEGY = "momentum"
         try:
             self.assertEqual(list(config.fixed_allocation_accounts()), ["IRP"])
+        finally:
+            config.PENSION_STRATEGY = original
+
+
+class SchedulerFixedTest(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+        hold(self.db, "연금저축", "AAA", 10)
+        self.job = scheduler.JobScheduler()
+
+    def tearDown(self):
+        self.db.close()
+
+    @patch("scheduler.SignalAccuracyEngine")
+    @patch("scheduler.WebhookNotifier")
+    @patch("scheduler.TelegramNotificationManager")
+    def test_run_fixed_rebalance_sends_alert_with_account_label(self, tg, wh, acc):
+        acc.return_value.record_rebalance_signal.return_value = {
+            "signal_id": "x", "direction": "BUY", "confidence": 0.5}
+        signals = self.job._run_fixed_rebalance(self.db, "연금저축", PORT, D)
+
+        self.assertTrue(signals)
+        send = tg.return_value.send_rebalance_alert
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["label"], "연금저축")
+        wh.return_value.send_webhook.assert_called_once()
+        event, payload = wh.return_value.send_webhook.call_args.args
+        self.assertEqual(event, "rebalance_signal")
+        self.assertEqual(payload["label"], "연금저축")
+        rows = self.db.query(RebalanceSignal).all()
+        self.assertEqual(len(rows), len(signals))
+        self.assertTrue(all(r.account_type == "연금저축" for r in rows))
+        self.assertEqual(acc.return_value.record_rebalance_signal.call_count, len(signals))
+
+    def test_one_account_failure_does_not_stop_the_other(self):
+        calls = []
+
+        def fake(db, account, portfolio, signal_date):
+            calls.append(account)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return []
+
+        with patch.object(self.job, "_run_fixed_rebalance", side_effect=fake):
+            self.job._check_fixed_accounts(self.db, D)
+        self.assertEqual(calls, ["연금저축", "IRP"])
+
+    def test_momentum_job_is_skipped_when_fixed(self):
+        with patch("scheduler.get_db") as get_db:
+            self.job._job_calculate_momentum()
+        get_db.assert_not_called()
+
+    def test_pension_price_map_follows_strategy(self):
+        original = config.PENSION_STRATEGY
+        try:
+            config.PENSION_STRATEGY = "fixed"
+            self.assertIs(scheduler.pension_price_map(), config.PENSION_PORTFOLIO)
+            config.PENSION_STRATEGY = "momentum"
+            self.assertIs(scheduler.pension_price_map(), config.PENSION_ETFS)
         finally:
             config.PENSION_STRATEGY = original
 

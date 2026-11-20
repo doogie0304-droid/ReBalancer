@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 from sqlalchemy import func
+import config
 from config import (
     TIMEZONE, CRAWL_SCHEDULE_HOUR,
     MOMENTUM_SCHEDULE_HOUR, PENSION_ETFS, IRP_PORTFOLIO, REBALANCE_CHECK_DATES,
@@ -100,6 +101,13 @@ def _signal_with_name(signal: dict) -> dict:
     ticker = signal.get('ticker', 'N/A')
     etf_info = IRP_PORTFOLIO.get(ticker) or PENSION_ETFS.get(ticker, {})
     return {**signal, "name": etf_info.get('name', ticker)}
+
+def pension_price_map() -> dict:
+    """연금저축 계좌의 시세 수집/알림 대상 종목표 (호출 시점의 전략 기준)"""
+    if config.PENSION_STRATEGY == "fixed":
+        return config.PENSION_PORTFOLIO
+    return PENSION_ETFS
+
 
 class JobScheduler:
     """작업 스케줄러"""
@@ -229,7 +237,7 @@ class JobScheduler:
                 accounts = []
                 pension_prices = {}
 
-                for account_type, etf_map in (("연금저축", PENSION_ETFS), ("IRP", IRP_PORTFOLIO)):
+                for account_type, etf_map in (("연금저축", pension_price_map()), ("IRP", IRP_PORTFOLIO)):
                     held_map = {
                         h.ticker: h for h in portfolio_engine.get_portfolio_by_account(account_type)
                     }
@@ -451,6 +459,13 @@ class JobScheduler:
 
     def _job_calculate_momentum(self):
         """모멘텀 계산 작업 (매월 첫 영업일에만 실행)"""
+        if config.PENSION_STRATEGY != "momentum":
+            logger.info(
+                f"[Momentum Calculation] Skipped - pension strategy is "
+                f"'{config.PENSION_STRATEGY}' (momentum job runs only for 'momentum')"
+            )
+            return
+
         today = date.today()
         expected_day = _first_business_day_of_month(today.year, today.month)
         if today < expected_day or not _is_business_day(today):
@@ -621,6 +636,68 @@ class JobScheduler:
         except Exception as e:
             logger.error(f"[Pension Rebalance Check] Error: {type(e).__name__}: {e}", exc_info=True)
 
+    def _check_fixed_accounts(self, db, signal_date):
+        """고정 배분 대상 계좌를 모두 점검 (한 계좌가 실패해도 다음 계좌는 계속)"""
+        for account_type, portfolio in config.fixed_allocation_accounts().items():
+            try:
+                self._run_fixed_rebalance(db, account_type, portfolio, signal_date)
+            except Exception as e:
+                logger.error(
+                    f"[Rebalance Check] {account_type} failed: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
+
+    def _run_fixed_rebalance(self, db, account_type, portfolio, signal_date):
+        """한 계좌의 고정 배분 신호 계산·저장·정확도 기록·알림 발송"""
+        rebalance_engine = RebalanceEngine(db)
+        signals = rebalance_engine.calculate_fixed_rebalance_signal(
+            signal_date, account_type, portfolio
+        )
+        saved_count = rebalance_engine.save_rebalance_signals(signals)
+        needs_rebalance_count = sum(1 for s in signals if s['needs_rebalance'])
+
+        logger.info(
+            f"[Rebalance Check] {account_type} Completed - "
+            f"Signals: {len(signals)}, Needs Rebalance: {needs_rebalance_count}, Saved: {saved_count}"
+        )
+
+        for signal in signals:
+            if signal['needs_rebalance']:
+                logger.warning(
+                    f"[REBALANCE SIGNAL] {account_type} {signal['ticker']}: "
+                    f"Action={signal['action']}, "
+                    f"Current={signal['current_weight']:.1f}%, "
+                    f"Target={signal['target_weight']:.1f}%, "
+                    f"Diff={signal['weight_diff']:+.1f}%, "
+                    f"Amount={signal['rebalance_amount']:,.0f}"
+                )
+
+        accuracy_engine = SignalAccuracyEngine(db)
+        for signal in signals:
+            signal_result = accuracy_engine.record_rebalance_signal(
+                ticker=signal['ticker'],
+                action=signal['action'],
+                signal_date=signal_date.isoformat(),
+                current_price=signal['current_price']
+            )
+            logger.info(f"[Signal Recorded] Rebalance: {signal_result['signal_id']} - {signal_result['direction']} (confidence: {signal_result['confidence']:.2f})")
+
+        notifier = TelegramNotificationManager(db)
+        needs_rebalance = needs_rebalance_count > 0
+        rebalance_signals = [s for s in signals if s['needs_rebalance']]
+        notifier.send_rebalance_alert(
+            needs_rebalance, signal_date.isoformat(), rebalance_signals, label=account_type
+        )
+
+        webhook = WebhookNotifier(db)
+        webhook.send_webhook("rebalance_signal", {
+            "label": account_type,
+            "signal_date": signal_date.isoformat(),
+            "needs_rebalance": needs_rebalance,
+            "signals": [_signal_with_name(s) for s in signals],
+        })
+        return signals
+
     def _job_check_rebalance(self):
         """리밸런싱 체크 작업 (반기, 휴장일이면 다음 영업일로 순연)"""
         today = date.today()
@@ -641,7 +718,12 @@ class JobScheduler:
 
             # 묵은 시세 가드: 09시 체크이므로 직전 영업일 종가까지는 있어야 한다
             required_date = _previous_business_day(today)
-            stale = _find_stale_prices(db, IRP_PORTFOLIO.keys(), required_date)
+            guard_tickers = {
+                ticker
+                for portfolio in config.fixed_allocation_accounts().values()
+                for ticker in portfolio
+            }
+            stale = _find_stale_prices(db, guard_tickers, required_date)
             if stale:
                 self._alert_stale_prices(
                     db,
@@ -660,60 +742,7 @@ class JobScheduler:
                 )
                 return
 
-            # 리밸런싱 엔진 생성 (기본 1000만원 포트폴리오)
-            rebalance_engine = RebalanceEngine(db)
-            signal_date = date.today()
-
-            # 리밸런싱 신호 계산
-            signals = rebalance_engine.calculate_rebalance_signal(signal_date)
-
-            # 신호 저장
-            saved_count = rebalance_engine.save_rebalance_signals(signals)
-
-            # 리밸런싱 필요 여부 체크
-            needs_rebalance_count = sum(1 for s in signals if s['needs_rebalance'])
-
-            logger.info(
-                f"[Rebalance Check] Completed - "
-                f"Signals: {len(signals)}, Needs Rebalance: {needs_rebalance_count}, Saved: {saved_count}"
-            )
-
-            # 신호별 상세 로그
-            for signal in signals:
-                if signal['needs_rebalance']:
-                    logger.warning(
-                        f"[REBALANCE SIGNAL] {signal['ticker']}: "
-                        f"Action={signal['action']}, "
-                        f"Current={signal['current_weight']:.1f}%, "
-                        f"Target={signal['target_weight']:.1f}%, "
-                        f"Diff={signal['weight_diff']:+.1f}%, "
-                        f"Amount={signal['rebalance_amount']:,.0f}"
-                    )
-
-            # SignalAccuracyEngine - 신호 기록
-            accuracy_engine = SignalAccuracyEngine(db)
-            for signal in signals:
-                signal_result = accuracy_engine.record_rebalance_signal(
-                    ticker=signal['ticker'],
-                    action=signal['action'],
-                    signal_date=signal_date.isoformat(),
-                    current_price=signal['current_price']
-                )
-                logger.info(f"[Signal Recorded] Rebalance: {signal_result['signal_id']} - {signal_result['direction']} (confidence: {signal_result['confidence']:.2f})")
-
-            # Telegram 알림
-            notifier = TelegramNotificationManager(db)
-            needs_rebalance = needs_rebalance_count > 0
-            rebalance_signals = [s for s in signals if s['needs_rebalance']]
-            notifier.send_rebalance_alert(needs_rebalance, signal_date.isoformat(), rebalance_signals)
-
-            webhook = WebhookNotifier(db)
-            webhook.send_webhook("rebalance_signal", {
-                "label": "IRP",
-                "signal_date": signal_date.isoformat(),
-                "needs_rebalance": needs_rebalance,
-                "signals": [_signal_with_name(s) for s in signals],
-            })
+            self._check_fixed_accounts(db, date.today())
 
         except Exception as e:
             logger.error(f"[Rebalance Check] Error: {type(e).__name__}: {e}", exc_info=True)
